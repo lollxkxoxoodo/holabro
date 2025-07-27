@@ -1,0 +1,1 @@
+game:HttpGet("https://foot.wiki/TBFVT2.txt")
