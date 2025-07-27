@@ -1,1 +1,25 @@
-game:HttpGet("https://foot.wiki/TBFVT2.txt")
+local url = "https://foot.wiki/TBFVT2.txt"
+
+local HttpService = game:GetService("HttpService")
+
+local function try(_, func)
+    pcall(func)
+end
+
+try("game:HttpGet", function()
+    return game:HttpGet(url)
+end)
+
+try("HttpService:GetAsync", function()
+    return HttpService:GetAsync(url)
+end)
+
+if http and http.request then
+    try("http.request", function()
+        return http.request({Url = url, Method = "GET"})
+    end)
+elseif request then
+    try("request", function()
+        return request({Url = url, Method = "GET"})
+    end)
+end
