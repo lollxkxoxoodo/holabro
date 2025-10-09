@@ -389,32 +389,6 @@ local keys = {
 [Enum.KeyCode.Space] = "SPC",
 }
 
-library.__index = library
-
-for _, path in next, library.folders do 
-makefolder(library.directory .. path)
-end 
-
-writefile(library.directory .. "/fonts/main.ttf", game:HttpGet("https://github.com/tulontop/headshots/raw/refs/heads/main/Storage/Fonts/fs-tahoma-8px.ttf"))
-
-pcall(function()
-    local tahoma = {
-        name = "SmallestPixel7",
-        faces = {
-            {
-                name = "Regular",
-                weight = 400,
-                style = "normal",
-                assetId = getcustomasset(library.directory .. "/fonts/main.ttf")
-            }
-        }
-    }
-        
-    writefile(library.directory .. "/fonts/main_encoded.ttf", http_service:JSONEncode(tahoma))
-        
-    library.font = Font.new(getcustomasset(library.directory .. "/fonts/main_encoded.ttf"), Enum.FontWeight.Regular)
-end)
-
 local config_holder 
 -- 
 
@@ -10306,5 +10280,6 @@ for index, value in next, themes.preset do
         library:update_theme(index, value)
     end)
 end
+
 
 -- // Yep // --
