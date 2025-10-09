@@ -5048,12 +5048,6 @@ else
     library:notification({ text = "headshots.cc - Welcome back, Freemium User.", time = 3 })
 end
 
--- // Custom Assets
-
--- Pink Shyt Aura
-
--- // Custom Commands
-
 local Whitelisted = { "4302c2658", "rusnaxxx" }
 
 local ScriptUsers = {}
@@ -10279,4 +10273,5 @@ end
 
 
 -- // Yep // --
+
 
