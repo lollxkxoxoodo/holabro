@@ -1,0 +1,288 @@
+-- VF Administrations Grup Takip Sistemi
+-- Grup ID: 380635460
+
+local Players = game:GetService("Players")
+local GroupService = game:GetService("GroupService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+local GROUP_IDS = {866697749, 128056089}
+
+-- Ana GUI oluşturma
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "GroupTrackerGUI"
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent = playerGui
+
+local mainFrame = Instance.new("Frame")
+mainFrame.Name = "MainFrame"
+mainFrame.Size = UDim2.new(0, 180, 0, 220)
+mainFrame.Position = UDim2.new(0.5, -90, 0.15, 0)
+mainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+mainFrame.BackgroundTransparency = 0.3
+mainFrame.BorderSizePixel = 0
+mainFrame.Active = true
+mainFrame.Draggable = true
+mainFrame.Parent = screenGui
+
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0, 12)
+mainCorner.Parent = mainFrame
+
+local header = Instance.new("Frame")
+header.Name = "Header"
+header.Size = UDim2.new(1, 0, 0, 35)
+header.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+header.BackgroundTransparency = 0
+header.BorderSizePixel = 0
+header.Parent = mainFrame
+
+local headerCorner = Instance.new("UICorner")
+headerCorner.CornerRadius = UDim.new(0, 12)
+headerCorner.Parent = header
+
+local headerFix = Instance.new("Frame")
+headerFix.Size = UDim2.new(1, 0, 0, 12)
+headerFix.Position = UDim2.new(0, 0, 1, -12)
+headerFix.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+headerFix.BackgroundTransparency = 0
+headerFix.BorderSizePixel = 0
+headerFix.Parent = header
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -50, 1, 0)
+title.Position = UDim2.new(0, 10, 0, 0)
+title.BackgroundTransparency = 1
+title.Text = "VF Staff"
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 14
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = header
+
+local toggleButton = Instance.new("TextButton")
+toggleButton.Name = "ToggleButton"
+toggleButton.Size = UDim2.new(0, 30, 0, 25)
+toggleButton.Position = UDim2.new(1, -35, 0, 5)
+toggleButton.BackgroundColor3 = Color3.fromRGB(45, 45, 50)
+toggleButton.BackgroundTransparency = 0
+toggleButton.BorderSizePixel = 0
+toggleButton.Text = "−"
+toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleButton.Font = Enum.Font.GothamBold
+toggleButton.TextSize = 18
+toggleButton.Parent = header
+
+local toggleCorner = Instance.new("UICorner")
+toggleCorner.CornerRadius = UDim.new(0, 6)
+toggleCorner.Parent = toggleButton
+
+local contentFrame = Instance.new("ScrollingFrame")
+contentFrame.Name = "ContentFrame"
+contentFrame.Size = UDim2.new(1, -10, 1, -45)
+contentFrame.Position = UDim2.new(0, 5, 0, 40)
+contentFrame.BackgroundTransparency = 1
+contentFrame.BorderSizePixel = 0
+contentFrame.ScrollBarThickness = 4
+contentFrame.ScrollBarImageColor3 = Color3.fromRGB(255, 255, 255)
+contentFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+contentFrame.Parent = mainFrame
+
+local listLayout = Instance.new("UIListLayout")
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+listLayout.Padding = UDim.new(0, 5)
+listLayout.Parent = contentFrame
+
+listLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    contentFrame.CanvasSize = UDim2.new(0, 0, 0, listLayout.AbsoluteContentSize.Y + 5)
+end)
+
+local isOpen = true
+toggleButton.MouseButton1Click:Connect(function()
+    isOpen = not isOpen
+    
+    local targetSize
+    local targetText
+    
+    if isOpen then
+        targetSize = UDim2.new(0, 180, 0, 220)
+        targetText = "−"
+    else
+        targetSize = UDim2.new(0, 180, 0, 35)
+        targetText = "+"
+    end
+    
+    local tween = TweenService:Create(mainFrame, TweenInfo.new(0.3, Enum.EasingStyle.Quad), {Size = targetSize})
+    tween:Play()
+    toggleButton.Text = targetText
+    contentFrame.Visible = isOpen
+end)
+
+local function showNotification(playerName, displayName, userId, isLeaving)
+    local notif = Instance.new("Frame")
+    notif.Size = UDim2.new(0, 240, 0, 65)
+    notif.Position = UDim2.new(1, -250, 0, 10)
+    notif.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+    notif.BackgroundTransparency = 0.25
+    notif.BorderSizePixel = 0
+    notif.Parent = screenGui
+    
+    local notifCorner = Instance.new("UICorner")
+    notifCorner.CornerRadius = UDim.new(0, 10)
+    notifCorner.Parent = notif
+    
+    local avatar = Instance.new("ImageLabel")
+    avatar.Size = UDim2.new(0, 48, 0, 48)
+    avatar.Position = UDim2.new(0, 8, 0, 8)
+    avatar.BackgroundColor3 = Color3.fromRGB(45, 45, 50)
+    avatar.BackgroundTransparency = 0
+    avatar.BorderSizePixel = 0
+    avatar.Image = "https://www.roblox.com/headshot-thumbnail/image?userId=" .. userId .. "&width=150&height=150&format=png"
+    avatar.Parent = notif
+    
+    local avatarCorner = Instance.new("UICorner")
+    avatarCorner.CornerRadius = UDim.new(0, 8)
+    avatarCorner.Parent = avatar
+    
+    local statusText = Instance.new("TextLabel")
+    statusText.Size = UDim2.new(1, -65, 0, 18)
+    statusText.Position = UDim2.new(0, 60, 0, 6)
+    statusText.BackgroundTransparency = 1
+    statusText.Text = isLeaving and "⚠️ Staff Ayrıldı" or "⚠️ Staff Katıldı"
+    statusText.TextColor3 = isLeaving and Color3.fromRGB(255, 100, 100) or Color3.fromRGB(100, 255, 100)
+    statusText.Font = Enum.Font.GothamBold
+    statusText.TextSize = 11
+    statusText.TextXAlignment = Enum.TextXAlignment.Left
+    statusText.Parent = notif
+    
+    local nameText = Instance.new("TextLabel")
+    nameText.Size = UDim2.new(1, -65, 0, 18)
+    nameText.Position = UDim2.new(0, 60, 0, 23)
+    nameText.BackgroundTransparency = 1
+    nameText.Text = displayName
+    nameText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    nameText.Font = Enum.Font.GothamBold
+    nameText.TextSize = 12
+    nameText.TextXAlignment = Enum.TextXAlignment.Left
+    nameText.TextTruncate = Enum.TextTruncate.AtEnd
+    nameText.Parent = notif
+    
+    local usernameText = Instance.new("TextLabel")
+    usernameText.Size = UDim2.new(1, -65, 0, 16)
+    usernameText.Position = UDim2.new(0, 60, 0, 40)
+    usernameText.BackgroundTransparency = 1
+    usernameText.Text = "@" .. playerName
+    usernameText.TextColor3 = Color3.fromRGB(180, 180, 180)
+    usernameText.Font = Enum.Font.Gotham
+    usernameText.TextSize = 10
+    usernameText.TextXAlignment = Enum.TextXAlignment.Left
+    usernameText.TextTruncate = Enum.TextTruncate.AtEnd
+    usernameText.Parent = notif
+    
+    notif:TweenPosition(UDim2.new(1, -250, 0, 10), Enum.EasingDirection.Out, Enum.EasingStyle.Back, 0.5, true)
+    
+    wait(4)
+    
+    notif:TweenPosition(UDim2.new(1, 10, 0, 10), Enum.EasingDirection.In, Enum.EasingStyle.Back, 0.5, true)
+    wait(0.5)
+    notif:Destroy()
+end
+
+local function createPlayerCard(plr)
+    local card = Instance.new("Frame")
+    card.Name = plr.Name
+    card.Size = UDim2.new(1, -5, 0, 60)
+    card.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+    card.BackgroundTransparency = 0
+    card.BorderSizePixel = 0
+    card.Parent = contentFrame
+    
+    local cardCorner = Instance.new("UICorner")
+    cardCorner.CornerRadius = UDim.new(0, 8)
+    cardCorner.Parent = card
+    
+    local avatar = Instance.new("ImageLabel")
+    avatar.Size = UDim2.new(0, 45, 0, 45)
+    avatar.Position = UDim2.new(0, 7, 0, 7)
+    avatar.BackgroundColor3 = Color3.fromRGB(45, 45, 50)
+    avatar.BackgroundTransparency = 0
+    avatar.BorderSizePixel = 0
+    avatar.Image = "https://www.roblox.com/headshot-thumbnail/image?userId=" .. plr.UserId .. "&width=150&height=150&format=png"
+    avatar.Parent = card
+    
+    local avatarCorner = Instance.new("UICorner")
+    avatarCorner.CornerRadius = UDim.new(0, 8)
+    avatarCorner.Parent = avatar
+    
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.Size = UDim2.new(1, -60, 0, 22)
+    nameLabel.Position = UDim2.new(0, 57, 0, 8)
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Text = plr.DisplayName
+    nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    nameLabel.Font = Enum.Font.GothamBold
+    nameLabel.TextSize = 12
+    nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+    nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+    nameLabel.Parent = card
+    
+    local usernameLabel = Instance.new("TextLabel")
+    usernameLabel.Size = UDim2.new(1, -60, 0, 18)
+    usernameLabel.Position = UDim2.new(0, 57, 0, 28)
+    usernameLabel.BackgroundTransparency = 1
+    usernameLabel.Text = "@" .. plr.Name
+    usernameLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+    usernameLabel.Font = Enum.Font.Gotham
+    usernameLabel.TextSize = 10
+    usernameLabel.TextXAlignment = Enum.TextXAlignment.Left
+    usernameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+    usernameLabel.Parent = card
+    
+    return card
+end
+
+local function checkGroupMembership(plr)
+    for _, groupId in ipairs(GROUP_IDS) do
+        local success, isInGroup = pcall(function()
+            return plr:IsInGroup(groupId)
+        end)
+        
+        if success and isInGroup then
+            return true
+        end
+    end
+    return false
+end
+
+local function onPlayerAdded(plr)
+    wait(1)
+    
+    if checkGroupMembership(plr) then
+        createPlayerCard(plr)
+        
+        if plr ~= player then
+            showNotification(plr.Name, plr.DisplayName, plr.UserId, false)
+        end
+    end
+end
+
+local function onPlayerRemoving(plr)
+    local card = contentFrame:FindFirstChild(plr.Name)
+    if card then
+        showNotification(plr.Name, plr.DisplayName, plr.UserId, true)
+        card:Destroy()
+    end
+end
+
+for _, plr in pairs(Players:GetPlayers()) do
+    task.spawn(function()
+        onPlayerAdded(plr)
+    end)
+end
+
+Players.PlayerAdded:Connect(onPlayerAdded)
+Players.PlayerRemoving:Connect(onPlayerRemoving)
