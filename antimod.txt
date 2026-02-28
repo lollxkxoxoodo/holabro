@@ -9,7 +9,7 @@ local UserInputService = game:GetService("UserInputService")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
-local GROUP_IDS = {866697749, 128056089}
+local GROUP_IDS = {811783767, 128056089}
 
 -- Ana GUI oluşturma
 local screenGui = Instance.new("ScreenGui")
