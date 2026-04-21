@@ -1,0 +1,144 @@
+import requests
+import time
+
+GROUP_ID = 827675604
+RAP_THRESHOLD = 50000
+
+def fetch_group_members():
+    members = []
+    cursor = None
+
+    while True:
+        params = {"limit": 100, "sortOrder": "Asc"}
+        if cursor:
+            params["cursor"] = cursor
+
+        response = requests.get(
+            f"https://groups.roblox.com/v1/groups/{GROUP_ID}/users",
+            params=params,
+            timeout=10
+        )
+        data = response.json()
+
+        if "errors" in data:
+            print(f"  [ERROR] {data['errors']}")
+            break
+
+        for member in data.get("data", []):
+            members.append({
+                "id": member["user"]["userId"],
+                "username": member["user"]["username"]
+            })
+
+        cursor = data.get("nextPageCursor")
+        if not cursor:
+            break
+
+        time.sleep(0.3)
+
+    return members
+
+def fetch_rap(user_id):
+    try:
+        response = requests.get(
+            f"https://inventory.roblox.com/v1/users/{user_id}/assets/collectibles",
+            params={"limit": 100, "sortOrder": "Asc"},
+            timeout=10
+        )
+        data = response.json()
+
+        if "errors" in data:
+            return None
+
+        total_rap = 0
+        cursor = None
+
+        while True:
+            params = {"limit": 100, "sortOrder": "Asc"}
+            if cursor:
+                params["cursor"] = cursor
+
+            r = requests.get(
+                f"https://inventory.roblox.com/v1/users/{user_id}/assets/collectibles",
+                params=params,
+                timeout=10
+            )
+            d = r.json()
+
+            if "errors" in d:
+                break
+
+            for item in d.get("data", []):
+                total_rap += item.get("recentAveragePrice", 0)
+
+            cursor = d.get("nextPageCursor")
+            if not cursor:
+                break
+
+            time.sleep(0.2)
+
+        return total_rap
+
+    except Exception:
+        return None
+
+def format_rap(value):
+    if value >= 1_000_000:
+        return f"{value/1_000_000:.1f}M"
+    elif value >= 1_000:
+        return f"{value/1_000:.1f}K"
+    return str(value)
+
+def main():
+    print("\n" + "─" * 40)
+    print("  Roblox RAP Scanner")
+    print(f"  Group ID  : {GROUP_ID}")
+    print(f"  Min RAP   : {format_rap(RAP_THRESHOLD)}")
+    print("─" * 40)
+    print("\n  Fetching members...\n")
+
+    members = fetch_group_members()
+    print(f"  Total members found : {len(members)}")
+    print("  Scanning inventories...\n")
+    print("─" * 40)
+
+    rich_users = []
+    private_count = 0
+
+    for i, member in enumerate(members, 1):
+        print(f"  [{i}/{len(members)}] Checking: {member['username']}", end="\r")
+        rap = fetch_rap(member["id"])
+
+        if rap is None:
+            private_count += 1
+        elif rap >= RAP_THRESHOLD:
+            rich_users.append({
+                "username": member["username"],
+                "rap": rap
+            })
+
+        time.sleep(0.3)
+
+    rich_users.sort(key=lambda x: x["rap"], reverse=True)
+
+    print("\n")
+    print("─" * 40)
+    print(f"  Results — {len(rich_users)} users above {format_rap(RAP_THRESHOLD)} RAP")
+    print("─" * 40)
+
+    if rich_users:
+        for u in rich_users:
+            bar = "█" * min(int(u["rap"] / RAP_THRESHOLD * 5), 20)
+            print(f"  {u['username']:<20} {format_rap(u['rap']):>8} RAP  {bar}")
+    else:
+        print("  No users found above the threshold.")
+
+    print("\n" + "─" * 40)
+    print("  Summary")
+    print("─" * 40)
+    print(f"  Total scanned    : {len(members)}")
+    print(f"  Above threshold  : {len(rich_users)}")
+    print(f"  Private/skipped  : {private_count}")
+    print("─" * 40 + "\n")
+
+main()
