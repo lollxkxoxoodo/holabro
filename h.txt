@@ -1,116 +1,216 @@
 import requests
+import random
 import time
+import threading
+import string
+import itertools
+from colorama import Fore, Style, init
 
-GROUP_ID = 827675604
-RAP_THRESHOLD = 50000
+init(autoreset=True)
 
-def fetch_group_members():
-    members = []
-    cursor = None
+class DiscordChecker:
+    def __init__(self):
+        self.proxies = self.load_proxies()
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.120 Mobile Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'tr-TR,tr;q=0.9,en;q=0.8',
+            'Content-Type': 'application/json',
+            'Origin': 'https://discord.com',
+            'Referer': 'https://discord.com/register'
+        }
+        self.available_usernames = []
+        self.taken_usernames = []
+        self.checked_count = 0
+        self.error_count = 0
+        self.lock = threading.Lock()
+        self.rate_limited_proxies = set()
+        self.proxy_usage_count = {}
+        self.username_generator = self._create_generator()
 
-    while True:
-        params = {"limit": 100, "sortOrder": "Asc"}
-        if cursor:
-            params["cursor"] = cursor
+    def load_proxies(self):
+        try:
+            with open("proxies.txt", "r") as f:
+                proxies = [line.strip() for line in f.readlines() if line.strip()]
+                print(f"{Fore.GREEN}✓ {len(proxies)} proxy yüklendi")
+                return proxies
+        except:
+            print(f"{Fore.YELLOW}⚠ proxies.txt bulunamadı, varsayılan liste kullanılıyor")
+            return ["156.228.89.117:3129", "156.248.81.163:3129", "156.228.190.120:3129", "156.242.47.98:3129", "156.228.81.161:3129", "156.228.125.160:3129"]
 
-        response = requests.get(
-            f"https://groups.roblox.com/v1/groups/{GROUP_ID}/users",
-            params=params,
-            timeout=10
-        )
-        data = response.json()
+    def _create_generator(self):
+        chars = string.ascii_lowercase + string.digits
+        all_combos = [''.join(p) for p in itertools.product(chars, repeat=3)]
+        random.shuffle(all_combos)
+        return iter(all_combos)
 
-        if "errors" in data:
-            print(f"  [ERROR] {data['errors']}")
-            break
+    def get_next_proxy(self):
+        with self.lock:
+            available = [p for p in self.proxies if p not in self.rate_limited_proxies]
+            if not available:
+                return None
+            proxy = random.choice(available)
+            self.proxy_usage_count[proxy] = self.proxy_usage_count.get(proxy, 0) + 1
+            return proxy
 
-        for member in data.get("data", []):
-            members.append({
-                "id": member["user"]["userId"],
-                "username": member["user"]["username"]
-            })
+    def mark_proxy_rate_limited(self, proxy):
+        with self.lock:
+            self.rate_limited_proxies.add(proxy)
+            print(f"{Fore.YELLOW}[PROXY] Rate limit - {proxy[:20]}...")
 
-        cursor = data.get("nextPageCursor")
-        if not cursor:
-            break
+    def check_username(self, username):
+        proxy = self.get_next_proxy()
+        if not proxy:
+            return False
 
-        time.sleep(0.3)
+        proxy_dict = {'http': f'http://{proxy}', 'https': f'http://{proxy}'}
+        url = "https://discord.com/api/v9/unique-username/username-attempt-unauthed"
+        data = {"username": username}
 
-    return members
+        try:
+            response = requests.post(url, json=data, headers=self.headers, proxies=proxy_dict, timeout=8)
+            
+            with self.lock:
+                self.checked_count += 1
 
-def fetch_rap_rolimons(user_id):
-    try:
-        response = requests.get(
-            f"https://api.rolimons.com/players/v1/playerinfo/{user_id}",
-            timeout=10
-        )
-        data = response.json()
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("taken", True):
+                    print(f"{Fore.RED}[DOLU] {username} - Kullanılıyor")
+                    with self.lock:
+                        self.taken_usernames.append(username)
+                else:
+                    print(f"{Fore.GREEN}[BOŞ] {username} - Müsait!")
+                    with self.lock:
+                        self.available_usernames.append(username)
+                    self.save_available(username)
+                return True
 
-        if not data.get("success"):
-            return None
+            elif response.status_code == 429:
+                print(f"{Fore.YELLOW}[RATE LIMIT] {username}")
+                self.mark_proxy_rate_limited(proxy)
+                return self.check_username(username)
+            else:
+                with self.lock:
+                    self.error_count += 1
+                print(f"{Fore.RED}[HATA] {username} - HTTP {response.status_code}")
+                return True
 
-        return data.get("rap", 0)
+        except Exception:
+            with self.lock:
+                self.error_count += 1
+            print(f"{Fore.RED}[BAĞLANTI HATASI] {username}")
+            return True
 
-    except Exception:
-        return None
+    def save_available(self, username):
+        try:
+            with open("bulunan.txt", "a") as f:
+                f.write(f"{username}\n")
+        except:
+            pass
 
-def format_rap(value):
-    if value >= 1_000_000:
-        return f"{value/1_000_000:.1f}M"
-    elif value >= 1_000:
-        return f"{value/1_000:.1f}K"
-    return str(value)
+    def worker(self, max_check):
+        while self.checked_count < max_check:
+            if not self.get_available_proxy_count():
+                print(f"{Fore.RED}[UYARI] Thread için proxy kalmadı!")
+                break
+                
+            try:
+                with self.lock:
+                    username = next(self.username_generator)
+            except StopIteration:
+                print(f"{Fore.CYAN}Tüm olası 3 haneli kombinasyonlar tükendi.")
+                break
+
+            result = self.check_username(username)
+            if not result:
+                break
+            time.sleep(random.uniform(0.1, 0.3))
+
+    def get_available_proxy_count(self):
+        with self.lock:
+            return len([p for p in self.proxies if p not in self.rate_limited_proxies])
+
+    def print_banner(self):
+        print(f"""
+{Fore.MAGENTA}
+╔══════════════════════════════════════════════════╗
+║                                                  ║
+║           🚀 DISCORD USERNAME CHECKER 🚀         ║
+║                                                  ║
+║                  Made by @csmi                   ║
+║                                                  ║
+║              ▬▬▬ 3 Haneli ▬▬▬                    ║
+║           Harf ve Sayı Kombinasyonu              ║
+║                                                  ║
+╚══════════════════════════════════════════════════╝
+{Style.RESET_ALL}
+""")
+
+    def print_stats(self):
+        print(f"""
+{Fore.CYAN}
+╔════════════════ İSTATİSTİKLER ════════════════╗
+║ Kontrol Edilen     : {self.checked_count:>20} ║
+║ Müsait Olanlar     : {len(self.available_usernames):>20} ║
+║ Dolu Olanlar       : {len(self.taken_usernames):>20} ║
+║ Hatalar            : {self.error_count:>20} ║
+║ Toplam Proxy       : {len(self.proxies):>20} ║
+║ Rate Limited Proxy : {len(self.rate_limited_proxies):>20} ║
+║ Kullanılabilir     : {self.get_available_proxy_count():>20} ║
+╚═══════════════════════════════════════════════╝
+{Style.RESET_ALL}
+""")
+
+    def start_checking(self, max_check=3000, thread_count=8):
+        self.print_banner()
+
+        if not self.proxies:
+            print(f"{Fore.RED}Proxy bulunamadı!")
+            return
+
+        print(f"{Fore.CYAN}Hedef operasyon başlıyor...")
+        print(f"{Fore.CYAN}Maksimum kontrol: {max_check}")
+        print(f"{Fore.CYAN}Thread sayısı: {thread_count}\n")
+
+        threads = []
+        for _ in range(thread_count):
+            t = threading.Thread(target=self.worker, args=(max_check,))
+            t.start()
+            threads.append(t)
+
+        last_count = 0
+        while any(t.is_alive() for t in threads):
+            time.sleep(5)
+            if self.checked_count > last_count + 50:
+                available_count = self.get_available_proxy_count()
+                print(f"{Fore.CYAN}--- {self.checked_count} kontrol tamamlandı ({len(self.available_usernames)} müsait) | {available_count} proxy kaldı ---")
+                last_count = self.checked_count
+
+                if available_count == 0:
+                    print(f"{Fore.RED}[UYARI] Tüm proxy'ler sınırlandırıldı. Operasyon durduruluyor.")
+                    break
+
+        for t in threads:
+            t.join()
+
+        self.print_stats()
 
 def main():
-    print("\n" + "─" * 40)
-    print("  Roblox RAP Scanner  (via Rolimons)")
-    print(f"  Group ID  : {GROUP_ID}")
-    print(f"  Min RAP   : {format_rap(RAP_THRESHOLD)}")
-    print("─" * 40)
-    print("\n  Fetching members...\n")
+    checker = DiscordChecker()
+    try:
+        max_check_input = input(f"{Fore.CYAN}Maksimum kaç isim kontrol edilsin? (varsayılan 3000): ")
+        max_check = int(max_check_input) if max_check_input.strip() else 3000
+        
+        thread_count_input = input(f"{Fore.CYAN}Kaç thread kullanılsın? (varsayılan 8): ")
+        thread_count = int(thread_count_input) if thread_count_input.strip() else 8
 
-    members = fetch_group_members()
-    print(f"  Total members found : {len(members)}")
-    print("  Scanning RAP values via Rolimons...\n")
-    print("─" * 40)
+        checker.start_checking(max_check, thread_count)
+    except ValueError:
+        print(f"{Fore.RED}Geçersiz sayı formatı!")
+    except KeyboardInterrupt:
+        print(f"\n{Fore.YELLOW}İşlem kullanıcı tarafından durduruldu.")
+        checker.print_stats()
 
-    rich_users = []
-    unavailable_count = 0
-
-    for i, member in enumerate(members, 1):
-        print(f"  [{i}/{len(members)}] Checking: {member['username']:<20}", end="\r")
-        rap = fetch_rap_rolimons(member["id"])
-
-        if rap is None:
-            unavailable_count += 1
-        elif rap >= RAP_THRESHOLD:
-            rich_users.append({
-                "username": member["username"],
-                "rap": rap
-            })
-
-        time.sleep(0.5)
-
-    rich_users.sort(key=lambda x: x["rap"], reverse=True)
-
-    print("\n")
-    print("─" * 40)
-    print(f"  Results — {len(rich_users)} users above {format_rap(RAP_THRESHOLD)} RAP")
-    print("─" * 40)
-
-    if rich_users:
-        for u in rich_users:
-            bar = "█" * min(int(u["rap"] / RAP_THRESHOLD * 5), 20)
-            print(f"  {u['username']:<20} {format_rap(u['rap']):>8} RAP  {bar}")
-    else:
-        print("  No users found above the threshold.")
-
-    print("\n" + "─" * 40)
-    print("  Summary")
-    print("─" * 40)
-    print(f"  Total scanned      : {len(members)}")
-    print(f"  Above threshold    : {len(rich_users)}")
-    print(f"  Unavailable/skipped: {unavailable_count}")
-    print("─" * 40 + "\n")
-
-main()
+if __name__ == "__main__":
+    main()
