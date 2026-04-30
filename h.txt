@@ -1,216 +1,82 @@
-import requests
+import asyncio
+import aiohttp
 import random
+import os
 import time
-import threading
-import string
-import itertools
-from colorama import Fore, Style, init
+from aiohttp_socks import ProxyConnector
 
-init(autoreset=True)
-
-class DiscordChecker:
-    def __init__(self):
-        self.proxies = self.load_proxies()
+class DiscordProChecker:
+    def __init__(self, user_file, proxy_file, worker_count=5):
+        self.user_file = user_file
+        self.proxy_file = proxy_file
+        self.worker_count = worker_count
+        self.queue = asyncio.Queue()
+        self.proxies = self._load_list(self.proxy_file)
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.120 Mobile Safari/537.36',
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'tr-TR,tr;q=0.9,en;q=0.8',
-            'Content-Type': 'application/json',
-            'Origin': 'https://discord.com',
-            'Referer': 'https://discord.com/register'
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
         }
-        self.available_usernames = []
-        self.taken_usernames = []
-        self.checked_count = 0
-        self.error_count = 0
-        self.lock = threading.Lock()
-        self.rate_limited_proxies = set()
-        self.proxy_usage_count = {}
-        self.username_generator = self._create_generator()
+        self.active_backoff = 0
 
-    def load_proxies(self):
-        try:
-            with open("proxies.txt", "r") as f:
-                proxies = [line.strip() for line in f.readlines() if line.strip()]
-                print(f"{Fore.GREEN}✓ {len(proxies)} proxy yüklendi")
-                return proxies
-        except:
-            print(f"{Fore.YELLOW}⚠ proxies.txt bulunamadı, varsayılan liste kullanılıyor")
-            return ["156.228.89.117:3129", "156.248.81.163:3129", "156.228.190.120:3129", "156.242.47.98:3129", "156.228.81.161:3129", "156.228.125.160:3129"]
+    def _load_list(self, path):
+        if os.path.exists(path):
+            with open(path, "r") as f:
+                return [line.strip() for line in f if line.strip()]
+        return []
 
-    def _create_generator(self):
-        chars = string.ascii_lowercase
-        all_combos = [''.join(p) for p in itertools.product(chars, repeat=4)]
-        random.shuffle(all_combos)
-        return iter(all_combos)
-
-    def get_next_proxy(self):
-        with self.lock:
-            available = [p for p in self.proxies if p not in self.rate_limited_proxies]
-            if not available:
-                return None
-            proxy = random.choice(available)
-            self.proxy_usage_count[proxy] = self.proxy_usage_count.get(proxy, 0) + 1
-            return proxy
-
-    def mark_proxy_rate_limited(self, proxy):
-        with self.lock:
-            self.rate_limited_proxies.add(proxy)
-            print(f"{Fore.YELLOW}[PROXY] Rate limit - {proxy[:20]}...")
-
-    def check_username(self, username):
-        proxy = self.get_next_proxy()
-        if not proxy:
-            return False
-
-        proxy_dict = {'http': f'http://{proxy}', 'https': f'http://{proxy}'}
-        url = "https://discord.com/api/v9/unique-username/username-attempt-unauthed"
-        data = {"username": username}
-
-        try:
-            response = requests.post(url, json=data, headers=self.headers, proxies=proxy_dict, timeout=8)
+    async def worker(self, session):
+        while not self.queue.empty():
+            username = await self.queue.get()
             
-            with self.lock:
-                self.checked_count += 1
+            if self.active_backoff > time.time():
+                wait_time = self.active_backoff - time.time()
+                await asyncio.sleep(wait_time)
 
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("taken", True):
-                    print(f"{Fore.RED}[DOLU] {username} - Kullanılıyor")
-                    with self.lock:
-                        self.taken_usernames.append(username)
-                else:
-                    print(f"{Fore.GREEN}[BOŞ] {username} - Müsait!")
-                    with self.lock:
-                        self.available_usernames.append(username)
-                    self.save_available(username)
-                return True
+            proxy = random.choice(self.proxies)
+            proxy_url = f"http://{proxy}"
+            url = f"https://discord.com/api/v9/users/@me/is-unique?username={username}"
 
-            elif response.status_code == 429:
-                print(f"{Fore.YELLOW}[RATE LIMIT] {username}")
-                self.mark_proxy_rate_limited(proxy)
-                return self.check_username(username)
-            else:
-                with self.lock:
-                    self.error_count += 1
-                print(f"{Fore.RED}[HATA] {username} - HTTP {response.status_code}")
-                return True
-
-        except Exception:
-            with self.lock:
-                self.error_count += 1
-            print(f"{Fore.RED}[BAĞLANTI HATASI] {username}")
-            return True
-
-    def save_available(self, username):
-        try:
-            with open("bulunan.txt", "a") as f:
-                f.write(f"{username}\n")
-        except:
-            pass
-
-    def worker(self, max_check):
-        while self.checked_count < max_check:
-            if not self.get_available_proxy_count():
-                print(f"{Fore.RED}[UYARI] Thread için proxy kalmadı!")
-                break
-                
             try:
-                with self.lock:
-                    username = next(self.username_generator)
-            except StopIteration:
-                print(f"{Fore.CYAN}Tüm olası 4 harfli kombinasyonlar tükendi.")
-                break
+                async with session.get(url, proxy=proxy_url, timeout=10) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("taken") is False:
+                            print(f"[+] MEVCUT: {username}")
+                            with open("available.txt", "a") as f:
+                                f.write(f"{username}\n")
+                        else:
+                            print(f"[-] DOLU: {username}")
+                        
+                        await asyncio.sleep(random.uniform(1.2, 2.5))
 
-            result = self.check_username(username)
-            if not result:
-                break
-            time.sleep(random.uniform(0.1, 0.3))
+                    elif resp.status == 429:
+                        retry_after = (await resp.json()).get("retry_after", 5)
+                        self.active_backoff = time.time() + retry_after
+                        print(f"[!] LIMIT: {proxy} | {retry_after}s Bekleniyor...")
+                        await self.queue.put(username) 
+                        await asyncio.sleep(retry_after)
 
-    def get_available_proxy_count(self):
-        with self.lock:
-            return len([p for p in self.proxies if p not in self.rate_limited_proxies])
+                    elif resp.status in [401, 403]:
+                        if proxy in self.proxies: self.proxies.remove(proxy)
 
-    def print_banner(self):
-        print(f"""
-{Fore.MAGENTA}
-╔══════════════════════════════════════════════════╗
-║                                                  ║
-║           🚀 DISCORD USERNAME CHECKER 🚀         ║
-║                                                  ║
-║                  Made by @csmi                   ║
-║                                                  ║
-║              ▬▬▬ 4 Harfli ▬▬▬                    ║
-║             Sadece Harf Kombinasyonu             ║
-║                                                  ║
-╚══════════════════════════════════════════════════╝
-{Style.RESET_ALL}
-""")
+            except Exception:
+                if proxy in self.proxies: self.proxies.remove(proxy)
+            
+            finally:
+                self.queue.task_done()
 
-    def print_stats(self):
-        print(f"""
-{Fore.CYAN}
-╔════════════════ İSTATİSTİKLER ════════════════╗
-║ Kontrol Edilen     : {self.checked_count:>20} ║
-║ Müsait Olanlar     : {len(self.available_usernames):>20} ║
-║ Dolu Olanlar       : {len(self.taken_usernames):>20} ║
-║ Hatalar            : {self.error_count:>20} ║
-║ Toplam Proxy       : {len(self.proxies):>20} ║
-║ Rate Limited Proxy : {len(self.rate_limited_proxies):>20} ║
-║ Kullanılabilir     : {self.get_available_proxy_count():>20} ║
-╚═══════════════════════════════════════════════╝
-{Style.RESET_ALL}
-""")
+    async def run(self):
+        users = self._load_list(self.user_file)
+        for u in users:
+            await self.queue.put(u)
 
-    def start_checking(self, max_check=3000, thread_count=8):
-        self.print_banner()
-
-        if not self.proxies:
-            print(f"{Fore.RED}Proxy bulunamadı!")
-            return
-
-        print(f"{Fore.CYAN}Hedef operasyon başlıyor...")
-        print(f"{Fore.CYAN}Maksimum kontrol: {max_check}")
-        print(f"{Fore.CYAN}Thread sayısı: {thread_count}\n")
-
-        threads = []
-        for _ in range(thread_count):
-            t = threading.Thread(target=self.worker, args=(max_check,))
-            t.start()
-            threads.append(t)
-
-        last_count = 0
-        while any(t.is_alive() for t in threads):
-            time.sleep(5)
-            if self.checked_count > last_count + 50:
-                available_count = self.get_available_proxy_count()
-                print(f"{Fore.CYAN}--- {self.checked_count} kontrol tamamlandı ({len(self.available_usernames)} müsait) | {available_count} proxy kaldı ---")
-                last_count = self.checked_count
-
-                if available_count == 0:
-                    print(f"{Fore.RED}[UYARI] Tüm proxy'ler sınırlandırıldı. Operasyon durduruluyor.")
-                    break
-
-        for t in threads:
-            t.join()
-
-        self.print_stats()
-
-def main():
-    checker = DiscordChecker()
-    try:
-        max_check_input = input(f"{Fore.CYAN}Maksimum kaç isim kontrol edilsin? (varsayılan 3000): ")
-        max_check = int(max_check_input) if max_check_input.strip() else 3000
-        
-        thread_count_input = input(f"{Fore.CYAN}Kaç thread kullanılsın? (varsayılan 8): ")
-        thread_count = int(thread_count_input) if thread_count_input.strip() else 8
-
-        checker.start_checking(max_check, thread_count)
-    except ValueError:
-        print(f"{Fore.RED}Geçersiz sayı formatı!")
-    except KeyboardInterrupt:
-        print(f"\n{Fore.YELLOW}İşlem kullanıcı tarafından durduruldu.")
-        checker.print_stats()
+        conn = aiohttp.TCPConnector(limit_per_host=10)
+        async with aiohttp.ClientSession(connector=conn, headers=self.headers) as session:
+            workers = [asyncio.create_task(self.worker(session)) for _ in range(self.worker_count)]
+            await asyncio.gather(*workers)
 
 if __name__ == "__main__":
-    main()
+    checker = DiscordProChecker("usernames.txt", "proxies.txt", worker_count=3)
+    asyncio.run(checker.run())
