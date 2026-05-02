@@ -9,7 +9,7 @@ WEBHOOK_URL = "https://discord.com/api/webhooks/1500243297950765178/9Y4nQfvGODB-
 ROBLOX_VALIDATE_URL = "https://auth.roblox.com/v1/usernames/validate"
 THREAD_COUNT = 5
 CHECK_INTERVAL = 100
-LETTERS = string.ascii_lowercase
+LETTERS = string.ascii_lowercase  # Only lowercase letters, no numbers
 
 checked_count = 0
 valid_usernames = []
@@ -17,6 +17,7 @@ csrf_token = ""
 lock = threading.Lock()
 
 def generate_username():
+    """Generate exactly 5-letter username with only letters"""
     return "".join(random.choice(LETTERS) for _ in range(5))
 
 def get_csrf(session):
@@ -34,9 +35,10 @@ def send_webhook(session):
 
     with lock:
         total_checked = checked_count
-        names = valid_usernames[:]
+        names = valid_usernames.copy()
         valid_usernames.clear()
 
+    # Prepare the found usernames text
     if names:
         found_text = "\n".join([f"`@{name}`" for name in names[:15]])
         if len(names) > 15:
@@ -44,58 +46,84 @@ def send_webhook(session):
     else:
         found_text = "None"
 
+    # Create clean English embed
     embed = {
-        "title": "Roblox Username Checker",
-        "color": 5763719,
+        "title": "🔍 Roblox 5-Letter Username Scanner",
+        "color": 0x57F287,  # Green color
         "description": (
-            f"**Status:** Active\n"
-            f"**Checked:** `{total_checked}`\n"
+            f"**Status:** ✅ Active\n"
+            f"**Total Checked:** `{total_checked}`\n"
             f"**Available Found:** `{len(names)}`\n\n"
-            f"**Latest Results:**\n{found_text}"
+            f"**Latest Results:**\n{found_text}\n\n"
+            f"*Scanning 5-letter usernames (letters only)*"
         ),
         "footer": {
-            "text": "Automated Username Scan"
-        }
+            "text": "Automated Username Scanner • Letters Only"
+        },
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
     }
 
     payload = {
-        "username": "Username Checker",
+        "username": "5-Letter Username Checker",
         "embeds": [embed]
     }
 
     try:
-        session.post(WEBHOOK_URL, json=payload, timeout=10)
-    except:
-        pass
+        response = session.post(WEBHOOK_URL, json=payload, timeout=10)
+        if response.status_code == 204:
+            print(f"[WEBHOOK] Successfully sent update - {total_checked} checked")
+    except Exception as e:
+        print(f"[WEBHOOK] Failed to send: {e}")
 
 def check_username():
     global checked_count, csrf_token
 
     session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    })
+    
     get_csrf(session)
 
     while True:
+        # Generate exactly 5-letter username
         username = generate_username()
+        
+        # Verify it's exactly 5 characters and only letters
+        if len(username) != 5 or not username.isalpha():
+            continue
+            
         payload = {
             "birthday": "2000-01-01T00:00:00.000Z",
             "context": "Signup",
             "username": username
         }
 
-        headers = {"x-csrf-token": csrf_token}
+        headers = {
+            "x-csrf-token": csrf_token,
+            "Content-Type": "application/json"
+        }
 
         try:
-            res = session.post(ROBLOX_VALIDATE_URL, json=payload, headers=headers, timeout=10)
+            res = session.post(
+                ROBLOX_VALIDATE_URL, 
+                json=payload, 
+                headers=headers, 
+                timeout=10
+            )
 
+            # Handle CSRF token refresh
             if res.status_code == 403 and "x-csrf-token" in res.headers:
                 with lock:
                     csrf_token = res.headers["x-csrf-token"]
                 continue
 
+            # Handle rate limiting
             if res.status_code == 429:
                 time.sleep(2)
                 continue
 
+            # Parse response
             data = res.json()
             is_valid = data.get("code") == 0
 
@@ -104,22 +132,40 @@ def check_username():
                 current_count = checked_count
 
                 if is_valid:
-                    print(f"[+] AVAILABLE : @{username}")
+                    print(f"[✓] AVAILABLE: @{username}")
                     valid_usernames.append(username)
                 else:
-                    print(f"[-] TAKEN     : {username}")
+                    print(f"[✗] TAKEN:     @{username}")
 
+                # Send webhook every CHECK_INTERVAL checks
                 if current_count % CHECK_INTERVAL == 0:
                     send_webhook(session)
 
-        except:
-            pass
+        except Exception as e:
+            print(f"[ERROR] {username}: {str(e)[:50]}")
+            time.sleep(0.5)
 
 def run_checker():
-    print("Roblox 5-letter username checker started")
+    print("=" * 50)
+    print("Roblox 5-Letter Username Scanner Started")
+    print(f"Threads: {THREAD_COUNT}")
+    print(f"Webhook updates every: {CHECK_INTERVAL} checks")
+    print("Scanning: 5-letter usernames (a-z, no numbers)")
+    print("=" * 50)
+    
     with ThreadPoolExecutor(max_workers=THREAD_COUNT) as executor:
-        for _ in range(THREAD_COUNT):
-            executor.submit(check_username)
+        futures = []
+        for i in range(THREAD_COUNT):
+            futures.append(executor.submit(check_username))
+            print(f"[THREAD] Worker {i+1} started")
+        
+        # Keep the main thread alive
+        try:
+            for future in futures:
+                future.result()
+        except KeyboardInterrupt:
+            print("\n[STOP] Scanner stopped by user")
+            executor.shutdown(wait=False)
 
 if __name__ == "__main__":
     run_checker()
