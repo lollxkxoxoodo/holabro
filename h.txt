@@ -2,34 +2,34 @@ import requests
 import random
 import string
 import time
-from concurrent.futures import ThreadPoolExecutor
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 WEBHOOK_URL = "https://discord.com/api/webhooks/1500243297950765178/9Y4nQfvGODB-7dq21foPEZ1qaDKUApFCZ6yEu23wvMW1QbqlvbiWQBnjjvGmSL6g70He"
 ROBLOX_VALIDATE_URL = "https://auth.roblox.com/v1/usernames/validate"
-LETTERS = string.ascii_lowercase + string.digits
+THREAD_COUNT = 5
 CHECK_INTERVAL = 100
-THREAD_COUNT = 8
+LETTERS = string.ascii_lowercase
 
 checked_count = 0
 valid_usernames = []
 csrf_token = ""
 lock = threading.Lock()
-session = requests.Session()
 
-def get_csrf():
+def generate_username():
+    return "".join(random.choice(LETTERS) for _ in range(5))
+
+def get_csrf(session):
     global csrf_token
     try:
-        req = session.post("https://auth.roblox.com/v2/login")
-        csrf_token = req.headers.get("x-csrf-token", "")
+        r = session.post("https://auth.roblox.com/v2/login", timeout=10)
+        token = r.headers.get("x-csrf-token", "")
+        if token:
+            csrf_token = token
     except:
         pass
 
-def generate_username():
-    length = random.randint(6, 12)
-    return ''.join(random.choice(LETTERS) for _ in range(length))
-
-def send_webhook():
+def send_webhook(session):
     global valid_usernames, checked_count
 
     with lock:
@@ -38,9 +38,9 @@ def send_webhook():
         valid_usernames.clear()
 
     if names:
-        found_text = "\n".join([f"`@{name}`" for name in names[:10]])
-        if len(names) > 10:
-            found_text += f"\n...and {len(names) - 10} more"
+        found_text = "\n".join([f"`@{name}`" for name in names[:15]])
+        if len(names) > 15:
+            found_text += f"\n...and {len(names) - 15} more"
     else:
         found_text = "None"
 
@@ -71,6 +71,9 @@ def send_webhook():
 def check_username():
     global checked_count, csrf_token
 
+    session = requests.Session()
+    get_csrf(session)
+
     while True:
         username = generate_username()
         payload = {
@@ -78,6 +81,7 @@ def check_username():
             "context": "Signup",
             "username": username
         }
+
         headers = {"x-csrf-token": csrf_token}
 
         try:
@@ -106,15 +110,13 @@ def check_username():
                     print(f"[-] TAKEN     : {username}")
 
                 if current_count % CHECK_INTERVAL == 0:
-                    send_webhook()
+                    send_webhook(session)
 
         except:
             pass
 
 def run_checker():
-    print("Starting...")
-    get_csrf()
-
+    print("Roblox 5-letter username checker started")
     with ThreadPoolExecutor(max_workers=THREAD_COUNT) as executor:
         for _ in range(THREAD_COUNT):
             executor.submit(check_username)
