@@ -1,94 +1,123 @@
-import asyncio
-import aiohttp
+import requests
 import random
 import string
+import time
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 WEBHOOK_URL = "https://discord.com/api/webhooks/1500243297950765178/9Y4nQfvGODB-7dq21foPEZ1qaDKUApFCZ6yEu23wvMW1QbqlvbiWQBnjjvGmSL6g70He"
 ROBLOX_VALIDATE_URL = "https://auth.roblox.com/v1/usernames/validate"
-CHARS = string.ascii_lowercase + string.digits
-THREAD_COUNT = 30
+LETTERS = string.ascii_lowercase + string.digits
 CHECK_INTERVAL = 100
+THREAD_COUNT = 8
 
 checked_count = 0
 valid_usernames = []
 csrf_token = ""
+lock = threading.Lock()
+session = requests.Session()
 
-async def get_csrf(session):
-    async with session.post("https://auth.roblox.com/v2/login") as resp:
-        return resp.headers.get("x-csrf-token")
+def get_csrf():
+    global csrf_token
+    try:
+        req = session.post("https://auth.roblox.com/v2/login")
+        csrf_token = req.headers.get("x-csrf-token", "")
+    except:
+        pass
 
-async def check_health(session, token):
-    test_name = "".join(random.choice(CHARS) for _ in range(25))
-    payload = {
-        "birthday": "2000-01-01T00:00:00.000Z",
-        "context": "Signup",
-        "username": test_name
-    }
-    headers = {"x-csrf-token": token}
-    async with session.post(ROBLOX_VALIDATE_URL, json=payload, headers=headers) as resp:
-        if resp.status == 200:
-            data = await resp.json()
-            return data.get("code") == 0
-        return False
+def generate_username():
+    length = random.randint(6, 12)
+    return ''.join(random.choice(LETTERS) for _ in range(length))
 
-async def send_webhook(total, valids):
-    if not valids:
-        return
-    formatted = "\n".join([f"> `@{u}`" for u in valids])
+def send_webhook():
+    global valid_usernames, checked_count
+
+    with lock:
+        total_checked = checked_count
+        names = valid_usernames[:]
+        valid_usernames.clear()
+
+    if names:
+        found_text = "\n".join([f"`@{name}`" for name in names[:10]])
+        if len(names) > 10:
+            found_text += f"\n...and {len(names) - 10} more"
+    else:
+        found_text = "None"
+
     embed = {
-        "title": "🔍 Roblox Checker Status",
-        "color": 2829617,
-        "description": f"**Total Checked:** `{total}`\n\n**Found Usernames:**\n{formatted}",
-        "footer": {"text": "Async High-Speed System"}
+        "title": "Roblox Username Checker",
+        "color": 5763719,
+        "description": (
+            f"**Status:** Active\n"
+            f"**Checked:** `{total_checked}`\n"
+            f"**Available Found:** `{len(names)}`\n\n"
+            f"**Latest Results:**\n{found_text}"
+        ),
+        "footer": {
+            "text": "Automated Username Scan"
+        }
     }
-    async with aiohttp.ClientSession() as session:
-        await session.post(WEBHOOK_URL, json={"embeds": [embed]})
 
-async def worker(session):
-    global checked_count, csrf_token, valid_usernames
+    payload = {
+        "username": "Username Checker",
+        "embeds": [embed]
+    }
+
+    try:
+        session.post(WEBHOOK_URL, json=payload, timeout=10)
+    except:
+        pass
+
+def check_username():
+    global checked_count, csrf_token
+
     while True:
-        username = "".join(random.choice(CHARS) for _ in range(5))
-        if random.random() > 0.8:
-            username = "".join(random.choice(CHARS) for _ in range(random.randint(5, 6)))
-            
-        headers = {"x-csrf-token": csrf_token}
+        username = generate_username()
         payload = {
             "birthday": "2000-01-01T00:00:00.000Z",
             "context": "Signup",
             "username": username
         }
+        headers = {"x-csrf-token": csrf_token}
 
         try:
-            async with session.post(ROBLOX_VALIDATE_URL, json=payload, headers=headers) as resp:
-                if resp.status == 403:
-                    csrf_token = resp.headers.get("x-csrf-token")
-                    continue
-                if resp.status == 429:
-                    await asyncio.sleep(12)
-                    continue
-                if resp.status == 200:
-                    data = await resp.json()
-                    checked_count += 1
-                    if data.get("code") == 0:
-                        print(f"[+] AVAILABLE: {username}")
-                        valid_usernames.append(username)
-                    if checked_count % CHECK_INTERVAL == 0:
-                        asyncio.create_task(send_webhook(checked_count, list(valid_usernames)))
-                        valid_usernames.clear()
-        except:
-            await asyncio.sleep(1)
+            res = session.post(ROBLOX_VALIDATE_URL, json=payload, headers=headers, timeout=10)
 
-async def main():
-    global csrf_token
-    async with aiohttp.ClientSession() as session:
-        csrf_token = await get_csrf(session)
-        print("[!] Running integrity check...")
-        if not await check_health(session, csrf_token):
-            print("[X] ERROR: API is returning false positives (IP Shadowbanned).")
-            return
-        print("[V] System verified. Starting tasks.\n")
-        tasks = [asyncio.create_task(worker(session)) for _ in range(THREAD_COUNT)]
-        await asyncio.gather(*tasks)
+            if res.status_code == 403 and "x-csrf-token" in res.headers:
+                with lock:
+                    csrf_token = res.headers["x-csrf-token"]
+                continue
+
+            if res.status_code == 429:
+                time.sleep(2)
+                continue
+
+            data = res.json()
+            is_valid = data.get("code") == 0
+
+            with lock:
+                checked_count += 1
+                current_count = checked_count
+
+                if is_valid:
+                    print(f"[+] AVAILABLE : @{username}")
+                    valid_usernames.append(username)
+                else:
+                    print(f"[-] TAKEN     : {username}")
+
+                if current_count % CHECK_INTERVAL == 0:
+                    send_webhook()
+
+        except:
+            pass
+
+def run_checker():
+    print("Starting...")
+    get_csrf()
+
+    with ThreadPoolExecutor(max_workers=THREAD_COUNT) as executor:
+        for _ in range(THREAD_COUNT):
+            executor.submit(check_username)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run_checker()
