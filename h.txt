@@ -1,82 +1,120 @@
-import asyncio
-import aiohttp
+import requests
 import random
-import os
+import string
 import time
-from aiohttp_socks import ProxyConnector
 
-class DiscordProChecker:
-    def __init__(self, user_file, proxy_file, worker_count=5):
-        self.user_file = user_file
-        self.proxy_file = proxy_file
-        self.worker_count = worker_count
-        self.queue = asyncio.Queue()
-        self.proxies = self._load_list(self.proxy_file)
-        self.headers = {
-            "Accept": "*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+# --- CONFIGURATION ---
+WEBHOOK_URL = "https://discord.com/api/webhooks/1500243297950765178/9Y4nQfvGODB-7dq21foPEZ1qaDKUApFCZ6yEu23wvMW1QbqlvbiWQBnjjvGmSL6g70He"
+ROBLOX_VALIDATE_URL = "https://auth.roblox.com/v1/usernames/validate"
+LETTERS = string.ascii_lowercase
+CHECK_INTERVAL = 100
+
+class Roblox5LChecker:
+    def __init__(self):
+        self.session = requests.Session()
+        self.csrf_token = None
+        self.checked_count = 0
+        self.valid_usernames = []
+        self._refresh_csrf()
+
+    def _refresh_csrf(self):
+        """Fetches the initial CSRF token required for the Roblox API."""
+        try:
+            req = self.session.post("https://auth.roblox.com/v2/login")
+            if "x-csrf-token" in req.headers:
+                self.csrf_token = req.headers["x-csrf-token"]
+                self.session.headers.update({"x-csrf-token": self.csrf_token})
+                print("[!] CSRF Token acquired successfully.")
+        except Exception as e:
+            print(f"[X] Failed to get CSRF token: {e}")
+
+    def generate_username(self):
+        """Generates a random 5-letter username."""
+        return ''.join(random.choice(LETTERS) for _ in range(5))
+
+    def check_username(self, username):
+        """Checks if the username is available using the signup endpoint."""
+        payload = {
+            "birthday": "2000-01-01T00:00:00.000Z",
+            "context": "Signup",
+            "username": username
         }
-        self.active_backoff = 0
-
-    def _load_list(self, path):
-        if os.path.exists(path):
-            with open(path, "r") as f:
-                return [line.strip() for line in f if line.strip()]
-        return []
-
-    async def worker(self, session):
-        while not self.queue.empty():
-            username = await self.queue.get()
+        try:
+            res = self.session.post(ROBLOX_VALIDATE_URL, json=payload)
             
-            if self.active_backoff > time.time():
-                wait_time = self.active_backoff - time.time()
-                await asyncio.sleep(wait_time)
+            # If CSRF is invalid or expired, refresh and retry
+            if res.status_code == 403 and "x-csrf-token" in res.headers:
+                self._refresh_csrf()
+                return self.check_username(username)
+                
+            # 429 means Rate Limited (Too Many Requests)
+            if res.status_code == 429:
+                print("[!] Rate limited by Roblox! Sleeping for 5 seconds...")
+                time.sleep(5)
+                return False
 
-            proxy = random.choice(self.proxies)
-            proxy_url = f"http://{proxy}"
-            url = f"https://discord.com/api/v9/users/@me/is-unique?username={username}"
-
-            try:
-                async with session.get(url, proxy=proxy_url, timeout=10) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data.get("taken") is False:
-                            print(f"[+] MEVCUT: {username}")
-                            with open("available.txt", "a") as f:
-                                f.write(f"{username}\n")
-                        else:
-                            print(f"[-] DOLU: {username}")
-                        
-                        await asyncio.sleep(random.uniform(1.2, 2.5))
-
-                    elif resp.status == 429:
-                        retry_after = (await resp.json()).get("retry_after", 5)
-                        self.active_backoff = time.time() + retry_after
-                        print(f"[!] LIMIT: {proxy} | {retry_after}s Bekleniyor...")
-                        await self.queue.put(username) 
-                        await asyncio.sleep(retry_after)
-
-                    elif resp.status in [401, 403]:
-                        if proxy in self.proxies: self.proxies.remove(proxy)
-
-            except Exception:
-                if proxy in self.proxies: self.proxies.remove(proxy)
+            data = res.json()
+            # Code 0 typically means the username is valid and available
+            if data.get("code") == 0:
+                return True
+            return False
             
-            finally:
-                self.queue.task_done()
+        except Exception as e:
+            return False
 
-    async def run(self):
-        users = self._load_list(self.user_file)
-        for u in users:
-            await self.queue.put(u)
+    def send_webhook(self):
+        """Sends a stylish embed message to the Discord Webhook."""
+        description = f"**Total Checked:** `{self.checked_count}`\n\n"
+        
+        if self.valid_usernames:
+            # Prefixes the found usernames with @
+            formatted_names = "\n".join([f"> `@{u}`" for u in self.valid_usernames])
+            description += f"**Available Usernames Found ({len(self.valid_usernames)}):**\n{formatted_names}"
+        else:
+            description += "**Available Usernames Found:**\n> `None yet.`"
 
-        conn = aiohttp.TCPConnector(limit_per_host=10)
-        async with aiohttp.ClientSession(connector=conn, headers=self.headers) as session:
-            workers = [asyncio.create_task(self.worker(session)) for _ in range(self.worker_count)]
-            await asyncio.gather(*workers)
+        embed = {
+            "title": "🔍 Roblox 5L Checker Status",
+            "color": 5763719, # Greenish color
+            "description": description,
+            "thumbnail": {
+                "url": "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3a/Roblox_player_icon_black.svg/512px-Roblox_player_icon_black.svg.png"
+            },
+            "footer": {
+                "text": "Automated Termux Checker • Update every 100 checks"
+            }
+        }
+
+        try:
+            requests.post(WEBHOOK_URL, json={"embeds": [embed]})
+            print(f"[~] Webhook sent! (Checked: {self.checked_count})")
+        except Exception as e:
+            print(f"[X] Webhook sending failed: {e}")
+
+    def run(self):
+        print("========================================")
+        print("      Roblox 5L Username Checker        ")
+        print("========================================")
+        print("[+] Starting the checker process...\n")
+        
+        while True:
+            username = self.generate_username()
+            is_valid = self.check_username(username)
+            self.checked_count += 1
+            
+            if is_valid:
+                print(f"[+] AVAILABLE : @{username}")
+                self.valid_usernames.append(username)
+            else:
+                print(f"[-] TAKEN     : {username}")
+                
+            # Send webhook notification every 100 checks
+            if self.checked_count % CHECK_INTERVAL == 0:
+                self.send_webhook()
+                
+            # Anti-Rate Limit Delay (crucial for keeping the IP unbanned)
+            time.sleep(0.3)
 
 if __name__ == "__main__":
-    checker = DiscordProChecker("usernames.txt", "proxies.txt", worker_count=3)
-    asyncio.run(checker.run())
+    bot = Roblox5LChecker()
+    bot.run()
