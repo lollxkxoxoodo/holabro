@@ -48,7 +48,7 @@ def send_webhook(session):
 
     # Create clean English embed
     embed = {
-        "title": "🔍 Roblox 5-Letter Username Scanner",
+        "title": "🔍 Osusma Yusuf Scanner",
         "color": 0x57F287,  # Green color
         "description": (
             f"**Status:** ✅ Active\n"
@@ -64,7 +64,7 @@ def send_webhook(session):
     }
 
     payload = {
-        "username": "5-Letter Username Checker",
+        "username": "Osusma Username Checker",
         "embeds": [embed]
     }
 
