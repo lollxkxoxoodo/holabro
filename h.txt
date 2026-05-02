@@ -9,15 +9,16 @@ WEBHOOK_URL = "https://discord.com/api/webhooks/1500243297950765178/9Y4nQfvGODB-
 ROBLOX_VALIDATE_URL = "https://auth.roblox.com/v1/usernames/validate"
 THREAD_COUNT = 5
 CHECK_INTERVAL = 100
-LETTERS = string.ascii_lowercase  # Only lowercase letters, no numbers
+LETTERS = string.ascii_lowercase
 
 checked_count = 0
 valid_usernames = []
 csrf_token = ""
 lock = threading.Lock()
+last_request_time = 0
+REQUEST_DELAY = 0.3  # Her istek arası minimum bekleme süresi
 
 def generate_username():
-    """Generate exactly 5-letter username with only letters"""
     return "".join(random.choice(LETTERS) for _ in range(5))
 
 def get_csrf(session):
@@ -27,8 +28,11 @@ def get_csrf(session):
         token = r.headers.get("x-csrf-token", "")
         if token:
             csrf_token = token
-    except:
-        pass
+            print("[CSRF] Token acquired successfully")
+            return True
+    except Exception as e:
+        print(f"[CSRF] Failed to get token: {e}")
+    return False
 
 def send_webhook(session):
     global valid_usernames, checked_count
@@ -38,73 +42,88 @@ def send_webhook(session):
         names = valid_usernames.copy()
         valid_usernames.clear()
 
-    # Prepare the found usernames text
     if names:
-        found_text = "\n".join([f"`@{name}`" for name in names[:15]])
-        if len(names) > 15:
-            found_text += f"\n...and {len(names) - 15} more"
+        found_text = "\n".join([f"`@{name}`" for name in names[:10]])
+        if len(names) > 10:
+            found_text += f"\n...and {len(names) - 10} more"
     else:
-        found_text = "None"
+        found_text = "None found in this batch"
 
-    # Create clean English embed
     embed = {
-        "title": "🔍 Osusma Yusuf Scanner",
-        "color": 0x57F287,  # Green color
+        "title": "🔍 Osusma Username Scanner",
+        "color": 0x57F287,
         "description": (
             f"**Status:** ✅ Active\n"
             f"**Total Checked:** `{total_checked}`\n"
-            f"**Available Found:** `{len(names)}`\n\n"
-            f"**Latest Results:**\n{found_text}\n\n"
-            f"*Scanning 5-letter usernames (letters only)*"
+            f"**Available in This Batch:** `{len(names)}`\n\n"
+            f"**Latest Available:**\n{found_text}"
         ),
         "footer": {
-            "text": "Automated Username Scanner • Letters Only"
-        },
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+            "text": "Scanning: 5-letter usernames • Letters only"
+        }
     }
 
     payload = {
-        "username": "Osusma Username Checker",
+        "username": "Osusma scanner",
         "embeds": [embed]
     }
 
     try:
         response = session.post(WEBHOOK_URL, json=payload, timeout=10)
         if response.status_code == 204:
-            print(f"[WEBHOOK] Successfully sent update - {total_checked} checked")
+            print(f"[WEBHOOK] ✓ Update sent - Total: {total_checked}")
+        else:
+            print(f"[WEBHOOK] ✗ Failed with status: {response.status_code}")
     except Exception as e:
-        print(f"[WEBHOOK] Failed to send: {e}")
+        print(f"[WEBHOOK] ✗ Error: {e}")
 
 def check_username():
-    global checked_count, csrf_token
+    global checked_count, csrf_token, last_request_time
 
     session = requests.Session()
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     })
     
-    get_csrf(session)
+    # CSRF token al
+    if not get_csrf(session):
+        time.sleep(2)
+        get_csrf(session)
+
+    error_count = 0
+    max_errors = 5
 
     while True:
-        # Generate exactly 5-letter username
-        username = generate_username()
-        
-        # Verify it's exactly 5 characters and only letters
-        if len(username) != 5 or not username.isalpha():
-            continue
-            
-        payload = {
-            "birthday": "2000-01-01T00:00:00.000Z",
-            "context": "Signup",
-            "username": username
-        }
-
-        headers = {
-            "x-csrf-token": csrf_token,
-            "Content-Type": "application/json"
-        }
-
         try:
+            # Rate limiting kontrolü
+            with lock:
+                current_time = time.time()
+                time_since_last = current_time - last_request_time
+                if time_since_last < REQUEST_DELAY:
+                    time.sleep(REQUEST_DELAY - time_since_last)
+                last_request_time = time.time()
+
+            username = generate_username()
+            
+            # CSRF token kontrolü
+            if not csrf_token:
+                print("[WARNING] CSRF token missing, refreshing...")
+                if not get_csrf(session):
+                    time.sleep(5)
+                    continue
+
+            payload = {
+                "birthday": "2000-01-01T00:00:00.000Z",
+                "context": "Signup",
+                "username": username
+            }
+
+            headers = {
+                "x-csrf-token": csrf_token,
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            }
+
             res = session.post(
                 ROBLOX_VALIDATE_URL, 
                 json=payload, 
@@ -112,60 +131,97 @@ def check_username():
                 timeout=10
             )
 
-            # Handle CSRF token refresh
-            if res.status_code == 403 and "x-csrf-token" in res.headers:
-                with lock:
-                    csrf_token = res.headers["x-csrf-token"]
-                continue
-
-            # Handle rate limiting
-            if res.status_code == 429:
-                time.sleep(2)
-                continue
-
-            # Parse response
-            data = res.json()
-            is_valid = data.get("code") == 0
-
-            with lock:
-                checked_count += 1
-                current_count = checked_count
-
-                if is_valid:
-                    print(f"[✓] AVAILABLE: @{username}")
-                    valid_usernames.append(username)
+            # CSRF token yenileme
+            if res.status_code == 403:
+                if "x-csrf-token" in res.headers:
+                    with lock:
+                        csrf_token = res.headers["x-csrf-token"]
+                    print("[CSRF] Token refreshed")
+                    continue
                 else:
-                    print(f"[✗] TAKEN:     @{username}")
+                    print("[ERROR] 403 Forbidden - Possible IP ban")
+                    time.sleep(10)
+                    continue
 
-                # Send webhook every CHECK_INTERVAL checks
-                if current_count % CHECK_INTERVAL == 0:
-                    send_webhook(session)
+            # Rate limiting
+            if res.status_code == 429:
+                retry_after = res.headers.get("Retry-After", "5")
+                wait_time = int(retry_after) if retry_after.isdigit() else 5
+                print(f"[RATE LIMIT] Waiting {wait_time} seconds...")
+                time.sleep(wait_time)
+                continue
 
+            # Başarılı istek
+            if res.status_code == 200:
+                error_count = 0  # Hata sayacını sıfırla
+                data = res.json()
+                is_valid = data.get("code") == 0
+
+                with lock:
+                    checked_count += 1
+                    current_count = checked_count
+
+                    if is_valid:
+                        print(f"[✓] AVAILABLE: @{username}")
+                        valid_usernames.append(username)
+                    else:
+                        print(f"[✗] TAKEN:     @{username}")
+
+                    if current_count % CHECK_INTERVAL == 0:
+                        send_webhook(session)
+            else:
+                print(f"[ERROR] Unexpected status: {res.status_code}")
+                error_count += 1
+
+        except requests.exceptions.Timeout:
+            print("[TIMEOUT] Request timed out")
+            error_count += 1
+        except requests.exceptions.ConnectionError:
+            print("[ERROR] Connection failed - Retrying in 10s")
+            time.sleep(10)
+            error_count += 1
         except Exception as e:
-            print(f"[ERROR] {username}: {str(e)[:50]}")
-            time.sleep(0.5)
+            print(f"[ERROR] {str(e)[:100]}")
+            error_count += 1
+
+        # Çok fazla hata olursa bekle
+        if error_count >= max_errors:
+            print(f"[PAUSE] Too many errors ({error_count}), waiting 30 seconds...")
+            time.sleep(30)
+            error_count = 0
+            get_csrf(session)
+
+        # Her istek arası küçük bir bekleme
+        time.sleep(0.1)
 
 def run_checker():
-    print("=" * 50)
-    print("Roblox 5-Letter Username Scanner Started")
-    print(f"Threads: {THREAD_COUNT}")
-    print(f"Webhook updates every: {CHECK_INTERVAL} checks")
-    print("Scanning: 5-letter usernames (a-z, no numbers)")
-    print("=" * 50)
+    print("=" * 60)
+    print("🤖 Roblox 5-Letter Username Scanner")
+    print("=" * 60)
+    print(f"📊 Configuration:")
+    print(f"   • Threads: {THREAD_COUNT}")
+    print(f"   • Webhook updates: Every {CHECK_INTERVAL} checks")
+    print(f"   • Request delay: {REQUEST_DELAY}s")
+    print(f"   • Username format: 5 letters (a-z, no numbers)")
+    print("=" * 60)
+    print("[START] Scanner is running...\n")
     
-    with ThreadPoolExecutor(max_workers=THREAD_COUNT) as executor:
-        futures = []
-        for i in range(THREAD_COUNT):
-            futures.append(executor.submit(check_username))
-            print(f"[THREAD] Worker {i+1} started")
-        
-        # Keep the main thread alive
-        try:
+    try:
+        with ThreadPoolExecutor(max_workers=THREAD_COUNT) as executor:
+            futures = []
+            for i in range(THREAD_COUNT):
+                futures.append(executor.submit(check_username))
+                print(f"[THREAD] Worker {i+1} started")
+                time.sleep(0.5)  # Thread'leri yavaş başlat
+            
+            # Programı canlı tut
             for future in futures:
                 future.result()
-        except KeyboardInterrupt:
-            print("\n[STOP] Scanner stopped by user")
-            executor.shutdown(wait=False)
+                
+    except KeyboardInterrupt:
+        print("\n[STOP] Scanner stopped by user")
+    except Exception as e:
+        print(f"[FATAL] Critical error: {e}")
 
 if __name__ == "__main__":
     run_checker()
