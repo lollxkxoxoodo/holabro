@@ -1,300 +1,81 @@
-import os, sys, time, threading, requests, queue, logging, argparse, random, string
-from colorama import Fore, Style, init
-init(autoreset=True)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s", handlers=[logging.StreamHandler(sys.stderr)])
+import requests
+import time
 
-WEBHOOK_URL = "https://discord.com/api/webhooks/1500243297950765178/9Y4nQfvGODB-7dq21foPEZ1qaDKUApFCZ6yEu23wvMW1QbqlvbiWQBnjjvGmSL6g70He"
-LETTERS = string.ascii_lowercase  # Sadece harfler, sayı yok
+GROUP_ID = 827675604
 
-class RobloxUsernameChecker:
-    def __init__(self, thread_count=5, birthdate=None):
-        self.session = requests.Session()
-        self.thread_count = max(1, int(thread_count))
-        self.birthdate = birthdate or "2000-01-01"
-        self.checked = 0
-        self.available = 0
-        self.available_list = []
-        self.webhook_list = []
-        self.start_time = 0.0
-        self.lock = threading.Lock()
-        self.csrf_token = None
-        self.stop_flag = threading.Event()
-        self.obtain_csrf()
-    
-    def generate_username(self):
-        """Generate random 5-letter username (letters only, no numbers)"""
-        return "".join(random.choice(LETTERS) for _ in range(5))
-    
-    def obtain_csrf(self):
-        """Get CSRF token from Roblox"""
-        for attempt in range(3):
-            try:
-                r = self.session.post(
-                    "https://auth.roblox.com/v2/login",
-                    timeout=15,
-                    json={"ctype": "Username", "cvalue": "test", "password": "test"}
-                )
-                token = r.headers.get("x-csrf-token")
-                if token:
-                    self.csrf_token = token
-                    print(Fore.GREEN + f"[CSRF] ✓ Token acquired successfully")
-                    return True
-            except Exception as e:
-                print(Fore.YELLOW + f"[CSRF] Attempt {attempt+1}/3 failed: {str(e)[:50]}")
-                time.sleep(2)
-        
-        print(Fore.RED + "[CSRF] ✗ Failed to get token after 3 attempts")
-        return False
-    
-    def build_headers(self):
-        return {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Content-Type": "application/json;charset=UTF-8",
-            "X-CSRF-TOKEN": self.csrf_token or "",
-            "Origin": "https://www.roblox.com",
-            "Referer": "https://www.roblox.com/"
-        }
-    
-    def send_webhook(self):
-        """Send results to Discord webhook"""
-        with self.lock:
-            names = self.webhook_list.copy()
-            self.webhook_list.clear()
-            total_checked = self.checked
-        
-        if not names:
-            return
-        
-        found_text = "\n".join([f"`@{name}`" for name in names[:15]])
-        if len(names) > 15:
-            found_text += f"\n...and {len(names) - 15} more"
-        
-        embed = {
-            "title": "🔍 Roblox 5-Letter Username Scanner",
-            "color": 0x57F287,
-            "description": (
-                f"**Status:** ✅ Active\n"
-                f"**Total Checked:** `{total_checked}`\n"
-                f"**Available Found:** `{len(names)}`\n\n"
-                f"**Latest Results:**\n{found_text}\n\n"
-                f"*Scanning: 5-letter usernames (a-z only)*"
-            ),
-            "footer": {
-                "text": "Automated Username Scanner • Every 100 Checks"
-            }
-        }
-        
-        payload = {
-            "username": "5-Letter Username Checker",
-            "embeds": [embed]
-        }
-        
-        try:
-            response = requests.post(WEBHOOK_URL, json=payload, timeout=15)
-            if response.status_code == 204:
-                print(Fore.CYAN + f"[WEBHOOK] ✓ Report sent - Total checked: {total_checked}")
-            else:
-                print(Fore.RED + f"[WEBHOOK] ✗ Failed: Status {response.status_code}")
-        except Exception as e:
-            print(Fore.RED + f"[WEBHOOK] ✗ Error: {str(e)[:50]}")
-    
-    def check_once(self, username):
-        """Check single username availability"""
-        payload = {"username": username, "context": "Signup", "birthday": self.birthdate}
-        headers = self.build_headers()
-        
-        try:
-            r = self.session.post(
-                "https://auth.roblox.com/v1/usernames/validate",
-                json=payload,
-                headers=headers,
-                timeout=10
-            )
-        except requests.exceptions.Timeout:
-            return {"status": "error", "reason": "timeout"}
-        except requests.exceptions.RequestException as e:
-            return {"status": "error", "reason": str(e)[:50]}
-        
-        # Handle CSRF token refresh
-        if r.status_code in (401, 403):
-            if "x-csrf-token" in r.headers:
-                self.csrf_token = r.headers["x-csrf-token"]
-                print(Fore.YELLOW + "[CSRF] Token refreshed from response")
-                return {"status": "retry", "reason": "csrf_refreshed"}
-            else:
-                refreshed = self.obtain_csrf()
-                if refreshed:
-                    return {"status": "retry", "reason": "csrf_retry"}
-                return {"status": "error", "reason": f"auth_fail_{r.status_code}"}
-        
-        # Handle rate limiting
-        if r.status_code == 429:
-            retry_after = r.headers.get("Retry-After", "3")
-            try:
-                wait_time = int(retry_after)
-            except:
-                wait_time = 3
-            time.sleep(min(wait_time, 10))
-            return {"status": "retry", "reason": "rate_limited"}
-        
-        if r.status_code != 200:
-            return {"status": "error", "reason": f"HTTP_{r.status_code}"}
-        
-        try:
-            j = r.json()
-        except Exception:
-            return {"status": "error", "reason": "invalid_json"}
-        
-        code = j.get("code")
-        if code == 0:
-            return {"status": "available"}
-        elif code == 1:
-            return {"status": "taken"}
-        elif code == 2:
-            return {"status": "invalid"}
-        else:
-            return {"status": "unknown", "payload": j}
-    
-    def worker(self):
-        """Worker thread for checking usernames"""
-        while not self.stop_flag.is_set():
-            username = self.generate_username()
-            attempts = 0
-            
-            while attempts < 3 and not self.stop_flag.is_set():
-                attempts += 1
-                result = self.check_once(username)
-                
-                if result.get("status") == "retry":
-                    time.sleep(0.5 * attempts)
-                    continue
-                
-                with self.lock:
-                    self.checked += 1
-                    current_checked = self.checked
-                
-                if result.get("status") == "available":
-                    with self.lock:
-                        self.available += 1
-                        self.available_list.append(username)
-                        self.webhook_list.append(username)
-                    print(Fore.GREEN + f"[✓] AVAILABLE: @{username}")
-                    
-                    # Her 100 kontrolde webhook gönder
-                    if current_checked % 100 == 0:
-                        self.send_webhook()
-                        
-                elif result.get("status") == "taken":
-                    print(Fore.RED + f"[✗] TAKEN:     @{username}")
-                    
-                    # Her 100 kontrolde webhook gönder (bulunmasa bile)
-                    if current_checked % 100 == 0:
-                        self.send_webhook()
-                        
-                elif result.get("status") == "invalid":
-                    print(Fore.BLUE + f"[i] INVALID:   @{username}")
-                else:
-                    reason = result.get("reason", "unknown")
-                    print(Fore.YELLOW + f"[!] ERROR:     @{username} ({reason})")
-                
-                break
-            
-            # Küçük bekleme - rate limiting için
-            time.sleep(0.1)
-    
-    def print_header(self):
-        """Print startup information"""
-        print(Fore.CYAN + "=" * 60)
-        print(Fore.CYAN + "🤖 ROBOX 5-LETTER USERNAME SCANNER")
-        print(Fore.CYAN + "=" * 60)
-        print(Fore.WHITE + f"⚙️  Configuration:")
-        print(Fore.WHITE + f"   • Threads: {self.thread_count}")
-        print(Fore.WHITE + f"   • Webhook: Every 100 checks")
-        print(Fore.WHITE + f"   • Format: 5 letters (a-z, no numbers)")
-        print(Fore.WHITE + f"   • Birthdate: {self.birthdate}")
-        print(Fore.WHITE + f"   • Mode: Infinite scan")
-        print(Fore.CYAN + "=" * 60)
-    
-    def print_stats(self):
-        """Print current statistics"""
-        elapsed = max(0.0001, time.time() - self.start_time)
-        speed = self.checked / elapsed
-        success_rate = (self.available / self.checked * 100) if self.checked else 0.0
-        
-        print(Fore.MAGENTA + "─" * 60)
-        print(Fore.WHITE + f"📊 Statistics: {self.checked} checked | "
-              f"{self.available} available | "
-              f"Time: {elapsed:.1f}s | "
-              f"Speed: {speed:.1f}/s | "
-              f"Success: {success_rate:.2f}%")
-        print(Fore.MAGENTA + "─" * 60)
-    
-    def run(self):
-        """Main runner"""
-        self.print_header()
-        
-        if not self.csrf_token:
-            print(Fore.RED + "[ERROR] Cannot start without CSRF token!")
-            return
-        
-        self.start_time = time.time()
-        threads = []
-        
-        print(Fore.GREEN + f"\n[START] Launching {self.thread_count} worker threads...\n")
-        
-        for i in range(self.thread_count):
-            t = threading.Thread(target=self.worker)
-            t.daemon = True
-            t.start()
-            threads.append(t)
-            print(Fore.CYAN + f"[THREAD] Worker #{i+1} started")
-            time.sleep(0.5)  # Stagger thread starts
-        
-        print(Fore.GREEN + "\n[READY] Scanning 5-letter usernames...\n")
-        
-        try:
-            # Print stats every 10 seconds
-            while any(t.is_alive() for t in threads):
-                time.sleep(10)
-                self.print_stats()
-        except KeyboardInterrupt:
-            print(Fore.YELLOW + "\n\n[STOP] Shutting down gracefully...")
-            self.stop_flag.set()
-            
-            # Send final webhook before exit
-            if self.webhook_list:
-                print(Fore.CYAN + "[WEBHOOK] Sending final report...")
-                self.send_webhook()
-            
-            for t in threads:
-                t.join(timeout=2)
-        
-        self.print_stats()
-        print(Fore.GREEN + f"\n[DONE] Total available usernames found: {self.available}")
+def fetch_members():
+    members = []
+    cursor = None
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Roblox 5-Letter Username Scanner")
-    parser.add_argument("-t", "--threads", default="5", help="Number of threads (default: 5)")
-    parser.add_argument("-b", "--birthdate", default=None, help="Birthdate YYYY-MM-DD (default: 2000-01-01)")
-    args, _ = parser.parse_known_args()
-    
-    birth = args.birthdate
-    if not birth:
-        try:
-            inp = input("Enter birthdate (YYYY-MM-DD) [default 2000-01-01]: ").strip()
-            birth = inp if inp else "2000-01-01"
-        except Exception:
-            birth = "2000-01-01"
-    
-    try:
-        checker = RobloxUsernameChecker(
-            thread_count=int(args.threads),
-            birthdate=birth
+    while True:
+        params = {"limit": 100, "sortOrder": "Asc"}
+        if cursor:
+            params["cursor"] = cursor
+
+        response = requests.get(
+            f"https://groups.roblox.com/v1/groups/{GROUP_ID}/users",
+            params=params,
+            timeout=10
         )
-        checker.run()
-    except KeyboardInterrupt:
-        print(Fore.YELLOW + "\n[EXIT] Program terminated by user")
+        data = response.json()
+
+        if "errors" in data:
+            print(f"  [ERROR] API returned: {data['errors']}")
+            break
+
+        for member in data.get("data", []):
+            username = member["user"]["username"]
+            role = member["role"]["name"]
+            members.append((username, role))
+
+        cursor = data.get("nextPageCursor")
+        if not cursor:
+            break
+
+        time.sleep(0.5)
+
+    return members
+
+def categorize(members):
+    list_3l = [(u, r) for u, r in members if len(u) == 3]
+    list_4l = [(u, r) for u, r in members if len(u) == 4]
+    return list_3l, list_4l
+
+def print_section(title, items):
+    print(f"\n  {title} — {len(items)} found")
+    print("  " + "─" * 44)
+    if items:
+        for username, role in items:
+            print(f"    {username:<10}  →  {role}")
+    else:
+        print("    None found.")
+
+def main():
+    print("\n" + "─" * 46)
+    print("  Roblox Username Scanner")
+    print(f"  Group ID : {GROUP_ID}")
+    print("─" * 46)
+    print("\n  Scanning members, please wait...\n")
+
+    try:
+        members = fetch_members()
     except Exception as e:
-        logging.error(f"Unexpected error: {e}")
-        sys.exit(1)
+        print(f"  [ERROR] Connection failed: {e}")
+        return
+
+    list_3l, list_4l = categorize(members)
+
+    print(f"  Scan complete. Total members: {len(members)}")
+
+    print_section("3-Letter Usernames", list_3l)
+    print_section("4-Letter Usernames", list_4l)
+
+    print("\n" + "─" * 46)
+    print("  Summary")
+    print("─" * 46)
+    print(f"  Total scanned  : {len(members)}")
+    print(f"  3L usernames   : {len(list_3l)}")
+    print(f"  4L usernames   : {len(list_4l)}")
+    print("─" * 46 + "\n")
+
+main()
