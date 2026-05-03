@@ -1,156 +1,369 @@
-import aiohttp
-import asyncio
-import sys
+import requests
+import time
+import getpass
 from collections import defaultdict
 
-# --- YAPILANDIRMA ---
+# ─────────────────────────────────────────
+#  CONFIG
+# ─────────────────────────────────────────
 GROUP_ID = 827675604
-COOKIE = "BURAYA_.ROBLOSECURITY_DEGERINI_YAPISTIRIN"
-DRY_RUN = True  # İlk başta True kalsın, test edin.
 
-ROLE_THRESHOLDS = {
-    "Topline": 15,
-    "Elite": 10,
-    "Plus": 5
+# Rol isimleri — Roblox grubundaki EXACT isimlerle eşleşmeli!
+ROLE_PLUS    = "Plus"
+ROLE_ELITE   = "Elite"
+ROLE_TOPLINE = "Topline"
+
+# Eşikler (kaç kıyafet → hangi rol)
+THRESHOLDS = [
+    (15, ROLE_TOPLINE),
+    (10, ROLE_ELITE),
+    (5,  ROLE_PLUS),
+]
+
+# Rol sıralaması (düşükten yükseğe)
+ROLE_RANK = {
+    ROLE_PLUS:    1,
+    ROLE_ELITE:   2,
+    ROLE_TOPLINE: 3,
 }
 
-class TermuxRobloxBot:
-    def __init__(self, group_id, cookie):
-        self.group_id = group_id
-        self.cookie = cookie
-        # Termux/Mobil cihaz gibi görünmek için User-Agent ekledik
-        self.headers = {
-            "Cookie": f".ROBLOSECURITY={self.cookie}",
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-        }
-        self.csrf_token = None
-        self.role_ids = {}
+# ─────────────────────────────────────────
+#  SESSION
+# ─────────────────────────────────────────
+session = requests.Session()
 
-    async def get_csrf_token(self, session):
-        """Bağlantı kopmalarına karşı dirençli CSRF alıcı"""
-        url = "https://auth.roblox.com/v2/logout"
-        try:
-            async with session.post(url, headers=self.headers) as response:
-                token = response.headers.get("x-csrf-token")
-                if token:
-                    self.csrf_token = token
-                    self.headers["X-CSRF-TOKEN"] = token
-                    return True
-        except Exception as e:
-            print(f"[!] CSRF Alınırken Bağlantı Koptu, Tekrar Deneniyor... {e}")
-            await asyncio.sleep(2)
-            return await self.get_csrf_token(session)
+def setup_session(cookie: str):
+    """Cookie'yi session'a set et ve CSRF token al."""
+    session.cookies.set(".ROBLOSECURITY", cookie, domain=".roblox.com")
+
+    # CSRF token al (rol vermek için gerekli)
+    r = session.post("https://auth.roblox.com/v2/logout", timeout=10)
+    csrf = r.headers.get("x-csrf-token")
+    if csrf:
+        session.headers.update({"x-csrf-token": csrf})
+        return True
+    return False
+
+def verify_cookie():
+    """Cookie'nin geçerli olduğunu doğrula, kullanıcı adını döndür."""
+    r = session.get("https://users.roblox.com/v1/users/authenticated", timeout=10)
+    if r.status_code == 200:
+        data = r.json()
+        return data.get("name"), data.get("id")
+    return None, None
+
+
+# ─────────────────────────────────────────
+#  1. Grup üyelerini çek (userId → {username, role, roleId})
+# ─────────────────────────────────────────
+def fetch_group_members():
+    members = {}
+    cursor = None
+    print("  [1/4] Fetching group members...")
+
+    while True:
+        params = {"limit": 100, "sortOrder": "Asc"}
+        if cursor:
+            params["cursor"] = cursor
+
+        r = session.get(
+            f"https://groups.roblox.com/v1/groups/{GROUP_ID}/users",
+            params=params, timeout=10
+        )
+        data = r.json()
+
+        if "errors" in data:
+            print(f"  [ERROR] {data['errors']}")
+            break
+
+        for m in data.get("data", []):
+            uid = m["user"]["userId"]
+            members[uid] = {
+                "username": m["user"]["username"],
+                "role":     m["role"]["name"],
+                "roleId":   m["role"]["id"],
+            }
+
+        cursor = data.get("nextPageCursor")
+        if not cursor:
+            break
+        time.sleep(0.4)
+
+    return members
+
+
+# ─────────────────────────────────────────
+#  2. Grup rollerini ve ID'lerini çek
+# ─────────────────────────────────────────
+def fetch_group_roles():
+    """Döner: {role_name: role_id}"""
+    r = session.get(
+        f"https://groups.roblox.com/v1/groups/{GROUP_ID}/roles",
+        timeout=10
+    )
+    data = r.json()
+    roles = {}
+    for role in data.get("roles", []):
+        roles[role["name"]] = role["id"]
+    return roles
+
+
+# ─────────────────────────────────────────
+#  3. Satış verisi — Group Revenue API
+# ─────────────────────────────────────────
+def fetch_sales_data():
+    """
+    Grubun kıyafet satışlarını çeker.
+    Döner: {buyer_userId: item_count}
+    NOT: API sadece son ~30 günü döndürür.
+    """
+    sales = defaultdict(int)
+    cursor = None
+    page = 0
+    print("  [2/4] Fetching sales data (last ~30 days)...")
+
+    while True:
+        params = {
+            "limit":         100,
+            "transactionType": "Sale",
+        }
+        if cursor:
+            params["cursor"] = cursor
+
+        r = session.get(
+            f"https://economy.roblox.com/v2/groups/{GROUP_ID}/transactions",
+            params=params, timeout=10
+        )
+
+        if r.status_code == 403:
+            print("  [ERROR] Sales API erişimi reddedildi.")
+            print("          Cookie yetersiz yetki veya hesap grubun sahibi değil.")
+            return None
+
+        data = r.json()
+
+        if "errors" in data:
+            print(f"  [ERROR] Sales API: {data['errors']}")
+            break
+
+        for tx in data.get("data", []):
+            # Sadece kıyafet satışları (Shirt/Pants/T-Shirt)
+            details = tx.get("details", {})
+            asset_type = details.get("type", "")
+            if asset_type not in ("Shirt", "Pants", "TShirt", ""):
+                continue
+
+            agent = tx.get("agent", {})
+            buyer_id = agent.get("id")
+            if buyer_id:
+                sales[buyer_id] += 1
+
+        page += 1
+        cursor = data.get("nextPageCursor")
+        if not cursor:
+            break
+
+        if page % 10 == 0:
+            print(f"    ... {page * 100} işlem tarandı")
+        time.sleep(0.4)
+
+    print(f"  → {len(sales)} alıcı, toplam satış tarandı.")
+    return dict(sales)
+
+
+# ─────────────────────────────────────────
+#  4. Hangi rolü alması gerektiğini hesapla
+# ─────────────────────────────────────────
+def calculate_target_role(item_count: int):
+    """
+    Satın alınan kıyafet sayısına göre hedef rolü döndür.
+    Eşiği karşılamıyorsa None döner.
+    """
+    for threshold, role_name in THRESHOLDS:
+        if item_count >= threshold:
+            return role_name
+    return None
+
+
+# ─────────────────────────────────────────
+#  5. Rol ver
+# ─────────────────────────────────────────
+def assign_role(user_id: int, role_id: int, username: str, role_name: str, dry_run: bool):
+    if dry_run:
+        return True  # dry run modunda gerçekten vermiyoruz
+
+    try:
+        r = session.patch(
+            f"https://groups.roblox.com/v1/groups/{GROUP_ID}/users/{user_id}",
+            json={"roleId": role_id},
+            timeout=10
+        )
+        if r.status_code == 200:
+            return True
+        else:
+            print(f"    [WARN] {username} → rol verilemedi: {r.status_code} {r.text[:80]}")
+            return False
+    except Exception as e:
+        print(f"    [ERROR] {username}: {e}")
         return False
 
-    async def safe_request(self, session, method, url, **kwargs):
-        """Bağlantı hatalarını (Connection Closed) yakalayan güvenli istek motoru"""
-        if not self.csrf_token:
-            await self.get_csrf_token(session)
 
-        kwargs['headers'] = self.headers
-        
-        try:
-            async with session.request(method, url, **kwargs) as response:
-                # CSRF Yenileme
-                if response.status == 403:
-                    token = response.headers.get("x-csrf-token")
-                    if token:
-                        self.csrf_token = token
-                        self.headers["X-CSRF-TOKEN"] = token
-                        return await self.safe_request(session, method, url, **kwargs)
-                
-                # Hız Sınırı
-                if response.status == 429:
-                    print("[!] Çok hızlı gidiyoruz, 10 saniye mola...")
-                    await asyncio.sleep(10)
-                    return await self.safe_request(session, method, url, **kwargs)
-                
-                if response.status == 200:
-                    return await response.json()
-                return None
+# ─────────────────────────────────────────
+#  6. Ana mantık
+# ─────────────────────────────────────────
+def process_roles(members: dict, sales: dict, group_roles: dict, dry_run: bool):
+    """
+    Sadece grup üyesi olan ve yeterli alışveriş yapan kişilere rol ver.
+    Hiçbir zaman rol düşürme yapmaz.
+    """
+    to_assign   = []  # [(user_id, username, current_role, target_role, item_count)]
+    skipped     = []
+    not_member  = []
 
-        except (aiohttp.ClientConnectionError, aiohttp.ServerDisconnectedError):
-            print("[!] Bağlantı koptu, 3 saniye sonra otomatik devam edilecek...")
-            await asyncio.sleep(3)
-            return await self.safe_request(session, method, url, **kwargs)
+    print(f"\n  [3/4] Analysing {len(sales)} buyers...\n")
 
-    async def run(self):
-        # Termux'ta bağlantı havuzunu (connector) limitli tutmak daha sağlıklıdır
-        connector = aiohttp.TCPConnector(limit_per_host=5)
-        async with aiohttp.ClientSession(connector=connector) as session:
-            print(f"\n--- [ {GROUP_ID} ] İÇİN ANALİZ BAŞLADI ---")
-            
-            # 1. Rolleri Al
-            print("[1/4] Rol yapılandırması çekiliyor...")
-            roles_data = await self.safe_request(session, 'GET', f"https://groups.roblox.com/v1/groups/{self.group_id}/roles")
-            if not roles_data:
-                print("Hata: Rol listesi alınamadı. Cookie veya internetinizi kontrol edin.")
-                return
-            
-            for r in roles_data['roles']:
-                self.role_ids[r['name']] = r['id']
+    for buyer_id, item_count in sales.items():
+        # Grupta değilse atla
+        if buyer_id not in members:
+            not_member.append(buyer_id)
+            continue
 
-            # 2. Üyeleri Al
-            print("[2/4] Grup üyeleri listeleniyor...")
-            members = {}
-            cursor = ""
-            while cursor is not None:
-                url = f"https://groups.roblox.com/v1/groups/{self.group_id}/users?limit=100" + (f"&cursor={cursor}" if cursor else "")
-                data = await self.safe_request(session, 'GET', url)
-                if not data: break
-                for m in data['data']:
-                    members[m['user']['userId']] = {"name": m['user']['username'], "role": m['role']['name']}
-                cursor = data.get("nextPageCursor")
+        member       = members[buyer_id]
+        username     = member["username"]
+        current_role = member["role"]
+        current_rank = ROLE_RANK.get(current_role, 0)
 
-            # 3. Satışları Al
-            print("[3/4] Satış geçmişi taranıyor (Bu biraz sürebilir)...")
-            sales = defaultdict(int)
-            cursor = ""
-            while cursor is not None:
-                url = f"https://economy.roblox.com/v2/groups/{self.group_id}/transactions?transactionType=Sale&limit=100" + (f"&cursor={cursor}" if cursor else "")
-                data = await self.safe_request(session, 'GET', url)
-                if not data: break
-                for t in data['data']:
-                    if t.get('agent', {}).get('agentType') == 'User':
-                        sales[t['agent']['id']] += 1
-                cursor = data.get("nextPageCursor")
-            
-            # 4. Analiz ve Uygulama
-            print(f"\n[4/4] Analiz Tamamlandı. Toplam {len(sales)} alıcı bulundu.")
-            print("-" * 50)
-            
-            hierarchy = {"Guest": 0, "Plus": 1, "Elite": 2, "Topline": 3}
-            
-            for uid, count in sales.items():
-                if uid in members:
-                    m_info = members[uid]
-                    curr_role = m_info['role']
-                    
-                    # Hak edilen rolü bul
-                    deserved = None
-                    if count >= ROLE_THRESHOLDS["Topline"]: deserved = "Topline"
-                    elif count >= ROLE_THRESHOLDS["Elite"]: deserved = "Elite"
-                    elif count >= ROLE_THRESHOLDS["Plus"]: deserved = "Plus"
-                    
-                    if deserved:
-                        c_rank = hierarchy.get(curr_role, -1)
-                        d_rank = hierarchy.get(deserved, -1)
-                        
-                        if d_rank > c_rank and c_rank != -1:
-                            if DRY_RUN:
-                                print(f"[DRY-RUN] {m_info['name']} ({count} Satın Alma): {curr_role} -> {deserved}")
-                            else:
-                                # Rol Değiştirme
-                                patch_url = f"https://groups.roblox.com/v1/groups/{self.group_id}/users/{uid}"
-                                res = await self.safe_request(session, 'PATCH', patch_url, json={"roleId": self.role_ids[deserved]})
-                                if res is not None or res == {}: # Roblox bazen boş dict döner
-                                    print(f"[BAŞARILI] {m_info['name']} artık {deserved}!")
-                                await asyncio.sleep(0.5) # Termux'ta aşırı ısınma/ban önleyici
+        target_role  = calculate_target_role(item_count)
 
-if __name__ == "__main__":
-    bot = TermuxRobloxBot(GROUP_ID, COOKIE)
-    try:
-        asyncio.run(bot.run())
-    except KeyboardInterrupt:
-        print("\n[!] İşlem kullanıcı tarafından durduruldu.")
+        if target_role is None:
+            skipped.append((username, item_count, "eşik karşılanmadı (<5)"))
+            continue
+
+        target_rank = ROLE_RANK.get(target_role, 0)
+
+        # Zaten daha yüksek veya eşit roldeyse atla (hiçbir zaman düşürme!)
+        if current_rank >= target_rank:
+            skipped.append((username, item_count, f"zaten {current_role} ({current_rank} ≥ {target_rank})"))
+            continue
+
+        to_assign.append((buyer_id, username, current_role, target_role, item_count))
+
+    return to_assign, skipped, not_member
+
+
+# ─────────────────────────────────────────
+#  7. Özet rapor
+# ─────────────────────────────────────────
+def print_plan(to_assign, skipped, not_member, dry_run):
+    mode_tag = "  *** DRY RUN — Gerçek rol verilmeyecek ***" if dry_run else "  *** CANLI MOD — Roller gerçekten verilecek ***"
+    print(f"\n{'─'*60}")
+    print(mode_tag)
+    print(f"{'─'*60}")
+
+    print(f"\n  ROL VERİLECEKLER  ({len(to_assign)} kişi)")
+    print(f"  {'─'*56}")
+    if to_assign:
+        for uid, uname, cur, tgt, cnt in sorted(to_assign, key=lambda x: x[4], reverse=True):
+            print(f"    {uname:<22} {cnt:>3} kıyafet   {cur:>8} → {tgt}")
+    else:
+        print("    Kimse yok.")
+
+    print(f"\n  ATLANANLAR  ({len(skipped)} kişi)")
+    print(f"  {'─'*56}")
+    if skipped:
+        for uname, cnt, reason in skipped[:20]:  # ilk 20'yi göster
+            print(f"    {uname:<22} {cnt:>3} kıyafet   ({reason})")
+        if len(skipped) > 20:
+            print(f"    ... ve {len(skipped)-20} kişi daha")
+
+    print(f"\n  GRUPTA OLMAYAN ALICILAR: {len(not_member)} kişi (atlandı)")
+    print(f"{'─'*60}\n")
+
+
+# ─────────────────────────────────────────
+#  MAIN
+# ─────────────────────────────────────────
+def main():
+    print("\n" + "─"*60)
+    print("  Roblox Auto Role Bot  |  Clothing Sales")
+    print(f"  Group ID  : {GROUP_ID}")
+    print(f"  Roller    : 5+ → {ROLE_PLUS}  |  10+ → {ROLE_ELITE}  |  15+ → {ROLE_TOPLINE}")
+    print("─"*60)
+
+    # — Cookie —
+    print("\n  Cookie'ni gir (gizli tutulur, diske yazılmaz):")
+    cookie = getpass.getpass("  .ROBLOSECURITY → ")
+
+    print("\n  Oturum açılıyor...")
+    if not setup_session(cookie.strip()):
+        print("  [ERROR] CSRF token alınamadı.")
+        return
+
+    bot_name, bot_id = verify_cookie()
+    if not bot_name:
+        print("  [ERROR] Cookie geçersiz veya süresi dolmuş.")
+        return
+    print(f"  ✓ Giriş yapıldı: {bot_name} (ID: {bot_id})")
+
+    # — Veri çek —
+    members     = fetch_group_members()
+    sales       = fetch_sales_data()
+    group_roles = fetch_group_roles()
+
+    if sales is None:
+        print("  [ERROR] Satış verisi alınamadı, çıkılıyor.")
+        return
+
+    print(f"\n  Grup üye sayısı : {len(members)}")
+    print(f"  Bilinen roller  : {list(group_roles.keys())}")
+
+    # Rol ID kontrolü
+    missing_roles = [r for r in [ROLE_PLUS, ROLE_ELITE, ROLE_TOPLINE] if r not in group_roles]
+    if missing_roles:
+        print(f"\n  [ERROR] Şu roller grupta bulunamadı: {missing_roles}")
+        print("          CONFIG'deki rol isimlerini grubunla eşleştir!")
+        return
+
+    # — Planla —
+    to_assign, skipped, not_member = process_roles(members, sales, group_roles, dry_run=True)
+
+    # — DRY RUN raporu —
+    print_plan(to_assign, skipped, not_member, dry_run=True)
+
+    if not to_assign:
+        print("  Verilecek yeni rol yok. Çıkılıyor.\n")
+        return
+
+    # — Onay —
+    print(f"  Toplam {len(to_assign)} kişiye rol verilecek.")
+    print("  Devam etmek istiyor musun?")
+    confirm = input("  Onayla [evet/hayir]: ").strip().lower()
+
+    if confirm != "evet":
+        print("\n  İptal edildi. Hiçbir şey değiştirilmedi.\n")
+        return
+
+    # — Gerçek rol ver —
+    print(f"\n  [4/4] Roller veriliyor...\n")
+    success = 0
+    fail    = 0
+
+    for uid, uname, cur, target_role, cnt in to_assign:
+        role_id = group_roles[target_role]
+        ok = assign_role(uid, role_id, uname, target_role, dry_run=False)
+        if ok:
+            print(f"    ✓ {uname:<22} → {target_role}  ({cnt} kıyafet)")
+            success += 1
+        else:
+            fail += 1
+        time.sleep(0.6)  # rate limit
+
+    print(f"\n{'─'*60}")
+    print(f"  TAMAMLANDI")
+    print(f"{'─'*60}")
+    print(f"  Başarılı  : {success}")
+    print(f"  Başarısız : {fail}")
+    print(f"{'─'*60}\n")
+
+
+main()
