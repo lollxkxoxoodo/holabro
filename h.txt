@@ -3,40 +3,55 @@ import time
 import getpass
 from collections import defaultdict
 
-# ─────────────────────────────────────────
-#  CONFIG
-# ─────────────────────────────────────────
-GROUP_ID = 827675604
-
-# Rol isimleri — Roblox grubundaki EXACT isimlerle eşleşmeli!
+GROUP_ID     = 827675604
 ROLE_PLUS    = "Plus"
 ROLE_ELITE   = "Elite"
 ROLE_TOPLINE = "Topline"
 
-# Eşikler (kaç kıyafet → hangi rol)
 THRESHOLDS = [
     (15, ROLE_TOPLINE),
     (10, ROLE_ELITE),
     (5,  ROLE_PLUS),
 ]
 
-# Rol sıralaması (düşükten yükseğe)
 ROLE_RANK = {
     ROLE_PLUS:    1,
     ROLE_ELITE:   2,
     ROLE_TOPLINE: 3,
 }
 
-# ─────────────────────────────────────────
-#  SESSION
-# ─────────────────────────────────────────
 session = requests.Session()
 
-def setup_session(cookie: str):
-    """Cookie'yi session'a set et ve CSRF token al."""
-    session.cookies.set(".ROBLOSECURITY", cookie, domain=".roblox.com")
+# ─────────────────────────────────────────
+#  Yardımcı: güvenli GET (retry + json)
+# ─────────────────────────────────────────
+def safe_get(url, params=None, retries=5):
+    """500/429 alınca bekleyip tekrar dener. JSON döner veya None."""
+    for attempt in range(retries):
+        try:
+            r = session.get(url, params=params, timeout=15)
+            if r.status_code == 200 and r.text:
+                return r.json()
+            elif r.status_code in (429, 500):
+                wait = (attempt + 1) * 4
+                print(f"    [HTTP {r.status_code}] {wait}s bekleniyor... ({attempt+1}/{retries})")
+                time.sleep(wait)
+            elif r.status_code == 403:
+                print(f"    [403] Erişim reddedildi: {url}")
+                return None
+            else:
+                print(f"    [HTTP {r.status_code}] {url}")
+                return None
+        except Exception as e:
+            print(f"    [HATA] {e}")
+            time.sleep(3)
+    return None
 
-    # CSRF token al (rol vermek için gerekli)
+# ─────────────────────────────────────────
+#  Session
+# ─────────────────────────────────────────
+def setup_session(cookie):
+    session.cookies.set(".ROBLOSECURITY", cookie, domain=".roblox.com")
     r = session.post("https://auth.roblox.com/v2/logout", timeout=10)
     csrf = r.headers.get("x-csrf-token")
     if csrf:
@@ -45,35 +60,27 @@ def setup_session(cookie: str):
     return False
 
 def verify_cookie():
-    """Cookie'nin geçerli olduğunu doğrula, kullanıcı adını döndür."""
     r = session.get("https://users.roblox.com/v1/users/authenticated", timeout=10)
     if r.status_code == 200:
-        data = r.json()
-        return data.get("name"), data.get("id")
+        d = r.json()
+        return d.get("name"), d.get("id")
     return None, None
 
-
 # ─────────────────────────────────────────
-#  1. Grup üyelerini çek (userId → {username, role, roleId})
+#  1. Grup üyeleri
 # ─────────────────────────────────────────
 def fetch_group_members():
     members = {}
-    cursor = None
-    print("  [1/4] Fetching group members...")
+    cursor  = None
+    print("  [1/4] Grup üyeleri çekiliyor...")
 
     while True:
         params = {"limit": 100, "sortOrder": "Asc"}
         if cursor:
             params["cursor"] = cursor
 
-        r = session.get(
-            f"https://groups.roblox.com/v1/groups/{GROUP_ID}/users",
-            params=params, timeout=10
-        )
-        data = r.json()
-
-        if "errors" in data:
-            print(f"  [ERROR] {data['errors']}")
+        data = safe_get(f"https://groups.roblox.com/v1/groups/{GROUP_ID}/users", params)
+        if not data:
             break
 
         for m in data.get("data", []):
@@ -87,111 +94,96 @@ def fetch_group_members():
         cursor = data.get("nextPageCursor")
         if not cursor:
             break
-        time.sleep(0.4)
+        time.sleep(0.5)
 
+    print(f"  → {len(members)} üye bulundu.")
     return members
 
-
 # ─────────────────────────────────────────
-#  2. Grup rollerini ve ID'lerini çek
+#  2. Grup rolleri
 # ─────────────────────────────────────────
 def fetch_group_roles():
-    """Döner: {role_name: role_id}"""
-    r = session.get(
-        f"https://groups.roblox.com/v1/groups/{GROUP_ID}/roles",
-        timeout=10
-    )
-    data = r.json()
-    roles = {}
-    for role in data.get("roles", []):
-        roles[role["name"]] = role["id"]
-    return roles
-
+    data = safe_get(f"https://groups.roblox.com/v1/groups/{GROUP_ID}/roles")
+    if not data:
+        return {}
+    return {r["name"]: r["id"] for r in data.get("roles", [])}
 
 # ─────────────────────────────────────────
-#  3. Satış verisi — Group Revenue API
+#  3. Satış verisi
 # ─────────────────────────────────────────
 def fetch_sales_data():
-    """
-    Grubun kıyafet satışlarını çeker.
-    Döner: {buyer_userId: item_count}
-    NOT: API sadece son ~30 günü döndürür.
-    """
-    sales = defaultdict(int)
+    sales  = defaultdict(int)
     cursor = None
-    page = 0
-    print("  [2/4] Fetching sales data (last ~30 days)...")
+    page   = 0
+    url    = f"https://economy.roblox.com/v2/groups/{GROUP_ID}/transactions"
+    print("  [2/4] Satış verisi çekiliyor (son ~30 gün)...")
 
     while True:
-        params = {
-            "limit":         100,
-            "transactionType": "Sale",
-        }
+        params = {"limit": 100, "transactionType": "Sale"}
         if cursor:
             params["cursor"] = cursor
 
-        r = session.get(
-            f"https://economy.roblox.com/v2/groups/{GROUP_ID}/transactions",
-            params=params, timeout=10
-        )
+        data = safe_get(url, params)
 
-        if r.status_code == 403:
-            print("  [ERROR] Sales API erişimi reddedildi.")
-            print("          Cookie yetersiz yetki veya hesap grubun sahibi değil.")
-            return None
-
-        data = r.json()
+        if data is None:
+            print("  [WARN] Satış API yanıt vermedi.")
+            break
 
         if "errors" in data:
-            print(f"  [ERROR] Sales API: {data['errors']}")
+            print(f"  [ERROR] {data['errors']}")
             break
 
         for tx in data.get("data", []):
-            # Sadece kıyafet satışları (Shirt/Pants/T-Shirt)
-            details = tx.get("details", {})
-            asset_type = details.get("type", "")
-            if asset_type not in ("Shirt", "Pants", "TShirt", ""):
-                continue
+            # v2 API'de buyer ID olası tüm alanlar
+            buyer_id = None
+            agent = tx.get("agent")
+            if isinstance(agent, dict):
+                buyer_id = agent.get("id")
+            elif isinstance(agent, int):
+                buyer_id = agent
 
-            agent = tx.get("agent", {})
-            buyer_id = agent.get("id")
+            if not buyer_id:
+                for field in ("purchaser", "buyer", "user"):
+                    val = tx.get(field)
+                    if isinstance(val, dict):
+                        buyer_id = val.get("id") or val.get("userId")
+                        if buyer_id:
+                            break
+                    elif isinstance(val, int):
+                        buyer_id = val
+                        break
+
             if buyer_id:
                 sales[buyer_id] += 1
 
-        page += 1
+        page  += 1
         cursor = data.get("nextPageCursor")
         if not cursor:
             break
 
         if page % 10 == 0:
-            print(f"    ... {page * 100} işlem tarandı")
-        time.sleep(0.4)
+            print(f"    ... {page * 100} işlem tarandı, {len(sales)} alıcı bulundu")
 
-    print(f"  → {len(sales)} alıcı, toplam satış tarandı.")
+        time.sleep(1.2)  # rate limit koruması
+
+    print(f"  → Toplam {len(sales)} alıcı, {page * 100} işlem tarandı.")
     return dict(sales)
 
-
 # ─────────────────────────────────────────
-#  4. Hangi rolü alması gerektiğini hesapla
+#  4. Hedef rol hesapla
 # ─────────────────────────────────────────
-def calculate_target_role(item_count: int):
-    """
-    Satın alınan kıyafet sayısına göre hedef rolü döndür.
-    Eşiği karşılamıyorsa None döner.
-    """
+def calculate_target_role(count):
     for threshold, role_name in THRESHOLDS:
-        if item_count >= threshold:
+        if count >= threshold:
             return role_name
     return None
-
 
 # ─────────────────────────────────────────
 #  5. Rol ver
 # ─────────────────────────────────────────
-def assign_role(user_id: int, role_id: int, username: str, role_name: str, dry_run: bool):
+def assign_role(user_id, role_id, username, dry_run):
     if dry_run:
-        return True  # dry run modunda gerçekten vermiyoruz
-
+        return True
     try:
         r = session.patch(
             f"https://groups.roblox.com/v1/groups/{GROUP_ID}/users/{user_id}",
@@ -200,170 +192,146 @@ def assign_role(user_id: int, role_id: int, username: str, role_name: str, dry_r
         )
         if r.status_code == 200:
             return True
-        else:
-            print(f"    [WARN] {username} → rol verilemedi: {r.status_code} {r.text[:80]}")
-            return False
+        print(f"    [WARN] {username} → {r.status_code}: {r.text[:80]}")
+        return False
     except Exception as e:
         print(f"    [ERROR] {username}: {e}")
         return False
 
-
 # ─────────────────────────────────────────
-#  6. Ana mantık
+#  6. Analiz
 # ─────────────────────────────────────────
-def process_roles(members: dict, sales: dict, group_roles: dict, dry_run: bool):
-    """
-    Sadece grup üyesi olan ve yeterli alışveriş yapan kişilere rol ver.
-    Hiçbir zaman rol düşürme yapmaz.
-    """
-    to_assign   = []  # [(user_id, username, current_role, target_role, item_count)]
-    skipped     = []
-    not_member  = []
+def process_roles(members, sales, group_roles):
+    to_assign  = []
+    skipped    = []
+    not_member = []
 
-    print(f"\n  [3/4] Analysing {len(sales)} buyers...\n")
+    print(f"\n  [3/4] {len(sales)} alıcı analiz ediliyor...")
 
-    for buyer_id, item_count in sales.items():
-        # Grupta değilse atla
+    for buyer_id, count in sales.items():
         if buyer_id not in members:
             not_member.append(buyer_id)
             continue
 
-        member       = members[buyer_id]
-        username     = member["username"]
-        current_role = member["role"]
+        m            = members[buyer_id]
+        username     = m["username"]
+        current_role = m["role"]
         current_rank = ROLE_RANK.get(current_role, 0)
-
-        target_role  = calculate_target_role(item_count)
+        target_role  = calculate_target_role(count)
 
         if target_role is None:
-            skipped.append((username, item_count, "eşik karşılanmadı (<5)"))
+            skipped.append((username, count, "eşik karşılanmadı (<5)"))
             continue
 
         target_rank = ROLE_RANK.get(target_role, 0)
 
-        # Zaten daha yüksek veya eşit roldeyse atla (hiçbir zaman düşürme!)
         if current_rank >= target_rank:
-            skipped.append((username, item_count, f"zaten {current_role} ({current_rank} ≥ {target_rank})"))
+            skipped.append((username, count, f"zaten {current_role}"))
             continue
 
-        to_assign.append((buyer_id, username, current_role, target_role, item_count))
+        to_assign.append((buyer_id, username, current_role, target_role, count))
 
     return to_assign, skipped, not_member
 
-
 # ─────────────────────────────────────────
-#  7. Özet rapor
+#  7. Rapor
 # ─────────────────────────────────────────
-def print_plan(to_assign, skipped, not_member, dry_run):
-    mode_tag = "  *** DRY RUN — Gerçek rol verilmeyecek ***" if dry_run else "  *** CANLI MOD — Roller gerçekten verilecek ***"
+def print_plan(to_assign, skipped, not_member):
     print(f"\n{'─'*60}")
-    print(mode_tag)
+    print(f"  *** DRY RUN — Henüz hiçbir şey değişmedi ***")
     print(f"{'─'*60}")
 
     print(f"\n  ROL VERİLECEKLER  ({len(to_assign)} kişi)")
     print(f"  {'─'*56}")
     if to_assign:
-        for uid, uname, cur, tgt, cnt in sorted(to_assign, key=lambda x: x[4], reverse=True):
-            print(f"    {uname:<22} {cnt:>3} kıyafet   {cur:>8} → {tgt}")
+        for _, uname, cur, tgt, cnt in sorted(to_assign, key=lambda x: x[4], reverse=True):
+            print(f"    {uname:<22} {cnt:>3} kıyafet   {cur} → {tgt}")
     else:
         print("    Kimse yok.")
 
-    print(f"\n  ATLANANLAR  ({len(skipped)} kişi)")
+    print(f"\n  ATLANACAKLAR  ({len(skipped)} kişi)")
     print(f"  {'─'*56}")
-    if skipped:
-        for uname, cnt, reason in skipped[:20]:  # ilk 20'yi göster
-            print(f"    {uname:<22} {cnt:>3} kıyafet   ({reason})")
-        if len(skipped) > 20:
-            print(f"    ... ve {len(skipped)-20} kişi daha")
+    for uname, cnt, reason in skipped[:15]:
+        print(f"    {uname:<22} {cnt:>3} kıyafet   ({reason})")
+    if len(skipped) > 15:
+        print(f"    ... ve {len(skipped)-15} kişi daha")
 
-    print(f"\n  GRUPTA OLMAYAN ALICILAR: {len(not_member)} kişi (atlandı)")
+    print(f"\n  GRUPTA OLMAYAN ALICILAR: {len(not_member)} (atlandı)")
     print(f"{'─'*60}\n")
-
 
 # ─────────────────────────────────────────
 #  MAIN
 # ─────────────────────────────────────────
 def main():
     print("\n" + "─"*60)
-    print("  Roblox Auto Role Bot  |  Clothing Sales")
-    print(f"  Group ID  : {GROUP_ID}")
-    print(f"  Roller    : 5+ → {ROLE_PLUS}  |  10+ → {ROLE_ELITE}  |  15+ → {ROLE_TOPLINE}")
+    print("  Roblox Auto Role Bot  v4")
+    print(f"  Group: {GROUP_ID}")
+    print(f"  5+ → {ROLE_PLUS}  |  10+ → {ROLE_ELITE}  |  15+ → {ROLE_TOPLINE}")
     print("─"*60)
 
-    # — Cookie —
-    print("\n  Cookie'ni gir (gizli tutulur, diske yazılmaz):")
-    cookie = getpass.getpass("  .ROBLOSECURITY → ")
+    cookie = getpass.getpass("\n  .ROBLOSECURITY → ")
 
     print("\n  Oturum açılıyor...")
     if not setup_session(cookie.strip()):
         print("  [ERROR] CSRF token alınamadı.")
         return
 
-    bot_name, bot_id = verify_cookie()
-    if not bot_name:
-        print("  [ERROR] Cookie geçersiz veya süresi dolmuş.")
+    name, uid = verify_cookie()
+    if not name:
+        print("  [ERROR] Cookie geçersiz.")
         return
-    print(f"  ✓ Giriş yapıldı: {bot_name} (ID: {bot_id})")
+    print(f"  ✓ Giriş: {name} (ID: {uid})")
 
-    # — Veri çek —
     members     = fetch_group_members()
     sales       = fetch_sales_data()
     group_roles = fetch_group_roles()
 
-    if sales is None:
-        print("  [ERROR] Satış verisi alınamadı, çıkılıyor.")
+    if not sales:
+        print("\n  [ERROR] Satış verisi alınamadı veya boş.")
+        print("  Olası nedenler:")
+        print("  - Son 30 günde hiç satış yok")
+        print("  - API geçici olarak yanıt vermiyor (birkaç dakika bekle)")
         return
 
-    print(f"\n  Grup üye sayısı : {len(members)}")
-    print(f"  Bilinen roller  : {list(group_roles.keys())}")
+    print(f"\n  Grup üyesi  : {len(members)}")
+    print(f"  Satış yapan : {len(sales)}")
+    print(f"  Roller      : {list(group_roles.keys())}")
 
-    # Rol ID kontrolü
-    missing_roles = [r for r in [ROLE_PLUS, ROLE_ELITE, ROLE_TOPLINE] if r not in group_roles]
-    if missing_roles:
-        print(f"\n  [ERROR] Şu roller grupta bulunamadı: {missing_roles}")
-        print("          CONFIG'deki rol isimlerini grubunla eşleştir!")
+    missing = [r for r in [ROLE_PLUS, ROLE_ELITE, ROLE_TOPLINE] if r not in group_roles]
+    if missing:
+        print(f"\n  [ERROR] Grupta bulunamayan roller: {missing}")
+        print("  Script'in üstündeki ROLE_PLUS/ELITE/TOPLINE değerlerini")
+        print("  grubundaki EXACT isimlerle değiştir!")
         return
 
-    # — Planla —
-    to_assign, skipped, not_member = process_roles(members, sales, group_roles, dry_run=True)
-
-    # — DRY RUN raporu —
-    print_plan(to_assign, skipped, not_member, dry_run=True)
+    to_assign, skipped, not_member = process_roles(members, sales, group_roles)
+    print_plan(to_assign, skipped, not_member)
 
     if not to_assign:
-        print("  Verilecek yeni rol yok. Çıkılıyor.\n")
+        print("  Verilecek yeni rol yok.\n")
         return
 
-    # — Onay —
-    print(f"  Toplam {len(to_assign)} kişiye rol verilecek.")
-    print("  Devam etmek istiyor musun?")
+    print(f"  {len(to_assign)} kişiye rol verilecek.")
     confirm = input("  Onayla [evet/hayir]: ").strip().lower()
 
     if confirm != "evet":
-        print("\n  İptal edildi. Hiçbir şey değiştirilmedi.\n")
+        print("\n  İptal. Hiçbir şey değişmedi.\n")
         return
 
-    # — Gerçek rol ver —
     print(f"\n  [4/4] Roller veriliyor...\n")
-    success = 0
-    fail    = 0
+    success = fail = 0
 
-    for uid, uname, cur, target_role, cnt in to_assign:
-        role_id = group_roles[target_role]
-        ok = assign_role(uid, role_id, uname, target_role, dry_run=False)
+    for uid, uname, cur, tgt, cnt in to_assign:
+        ok = assign_role(uid, group_roles[tgt], uname, dry_run=False)
         if ok:
-            print(f"    ✓ {uname:<22} → {target_role}  ({cnt} kıyafet)")
+            print(f"    ✓ {uname:<22} → {tgt}  ({cnt} kıyafet)")
             success += 1
         else:
             fail += 1
-        time.sleep(0.6)  # rate limit
+        time.sleep(0.7)
 
     print(f"\n{'─'*60}")
-    print(f"  TAMAMLANDI")
-    print(f"{'─'*60}")
-    print(f"  Başarılı  : {success}")
-    print(f"  Başarısız : {fail}")
+    print(f"  Başarılı : {success}  |  Başarısız : {fail}")
     print(f"{'─'*60}\n")
-
 
 main()
