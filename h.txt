@@ -1,81 +1,348 @@
 import requests
 import time
+import re
 
 GROUP_ID = 827675604
+RAP_THRESHOLD = 100_000
 
+# ─────────────────────────────────────────
+#  1. Grup üyelerini çek
+# ─────────────────────────────────────────
 def fetch_members():
     members = []
     cursor = None
+    print("  [1/4] Fetching group members...")
 
     while True:
         params = {"limit": 100, "sortOrder": "Asc"}
         if cursor:
             params["cursor"] = cursor
 
-        response = requests.get(
+        r = requests.get(
             f"https://groups.roblox.com/v1/groups/{GROUP_ID}/users",
-            params=params,
-            timeout=10
+            params=params, timeout=10
         )
-        data = response.json()
+        data = r.json()
 
         if "errors" in data:
-            print(f"  [ERROR] API returned: {data['errors']}")
+            print(f"  [ERROR] {data['errors']}")
             break
 
-        for member in data.get("data", []):
-            username = member["user"]["username"]
-            role = member["role"]["name"]
-            members.append((username, role))
+        for m in data.get("data", []):
+            members.append({
+                "userId":   m["user"]["userId"],
+                "username": m["user"]["username"],
+                "role":     m["role"]["name"],
+            })
 
         cursor = data.get("nextPageCursor")
         if not cursor:
             break
-
-        time.sleep(0.5)
+        time.sleep(0.4)
 
     return members
 
-def categorize(members):
-    list_3l = [(u, r) for u, r in members if len(u) == 3]
-    list_4l = [(u, r) for u, r in members if len(u) == 4]
-    return list_3l, list_4l
 
-def print_section(title, items):
-    print(f"\n  {title} — {len(items)} found")
-    print("  " + "─" * 44)
-    if items:
-        for username, role in items:
-            print(f"    {username:<10}  →  {role}")
+# ─────────────────────────────────────────
+#  2. Rolimons RAP
+# ─────────────────────────────────────────
+def fetch_rolimons_rap(user_id):
+    try:
+        r = requests.get(
+            f"https://www.rolimons.com/player/{user_id}",
+            timeout=8,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        if r.status_code != 200:
+            return None
+
+        match = re.search(r'"rap"\s*:\s*(\d+)', r.text)
+        if match:
+            return int(match.group(1))
+        return None
+    except Exception:
+        return None
+
+
+# ─────────────────────────────────────────
+#  3. Roblox Inventory API (envanterdeki limitedlar)
+# ─────────────────────────────────────────
+def fetch_inventory_limiteds(user_id):
+    """
+    Döner: {asset_id: {"name": str, "rap": int}} veya None (gizli envanter)
+    """
+    items = {}
+    cursor = None
+
+    try:
+        while True:
+            params = {"limit": 100, "assetType": "All", "sortOrder": "Asc"}
+            if cursor:
+                params["cursor"] = cursor
+
+            r = requests.get(
+                f"https://inventory.roblox.com/v1/users/{user_id}/assets/collectibles",
+                params=params, timeout=10
+            )
+
+            if r.status_code == 403:
+                return None  # envanter gizli
+
+            data = r.json()
+
+            for item in data.get("data", []):
+                aid = item.get("assetId")
+                if aid:
+                    items[aid] = {
+                        "name": item.get("name", "Unknown"),
+                        "rap":  item.get("recentAveragePrice", 0) or 0,
+                        "worn": False,
+                    }
+
+            cursor = data.get("nextPageCursor")
+            if not cursor:
+                break
+            time.sleep(0.3)
+
+        return items
+
+    except Exception:
+        return {}
+
+
+# ─────────────────────────────────────────
+#  4. Avatar API (şu an giyili itemlar)
+# ─────────────────────────────────────────
+def fetch_equipped_limiteds(user_id, inventory_items):
+    """
+    Avatar API'den giyili itemları çeker.
+    Inventory'de olmayan limitedları da ekler (RAP = catalog'dan çekilir).
+    Döner: {asset_id: {"name": str, "rap": int, "worn": True}}
+    """
+    equipped = {}
+
+    try:
+        r = requests.get(
+            f"https://avatar.roblox.com/v1/users/{user_id}/avatar",
+            timeout=8
+        )
+        if r.status_code != 200:
+            return {}
+
+        data = r.json()
+        asset_ids = [a["id"] for a in data.get("assets", []) if a.get("assetType", {}).get("id") not in (
+            # Sadece wearable kategoriler, hat/gear/face vb. hariç tutmuyoruz
+            # assetType id'leri: 8=Hat, 17=Gear, 18=Face, 19=Accessories vb.
+            # Limitedlara odaklanmak için tüm tipler dahil, catalog'da limited mi kontrol edilir
+        )]
+
+        for aid in asset_ids:
+            if aid in (inventory_items or {}):
+                # Inventory'de zaten var, worn flag'ini işaretle
+                equipped[aid] = {**inventory_items[aid], "worn": True}
+            else:
+                # Inventory'de yok — catalog'dan kontrol et (limited mi?)
+                rap = fetch_catalog_rap(aid)
+                if rap is not None:  # limited ise rap döner
+                    equipped[aid] = {
+                        "name": fetch_asset_name(aid),
+                        "rap":  rap,
+                        "worn": True,
+                    }
+            time.sleep(0.1)
+
+        return equipped
+
+    except Exception:
+        return {}
+
+
+def fetch_catalog_rap(asset_id):
+    """
+    Catalog API'den item'ın RAP değerini çeker.
+    Limited değilse None döner.
+    """
+    try:
+        r = requests.get(
+            f"https://economy.roblox.com/v1/assets/{asset_id}/resale-data",
+            timeout=6
+        )
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        rap = data.get("recentAveragePrice", None)
+        # RAP varsa ve 0'dan büyükse limited sayılır
+        return rap if rap and rap > 0 else None
+    except Exception:
+        return None
+
+
+def fetch_asset_name(asset_id):
+    try:
+        r = requests.get(
+            f"https://economy.roblox.com/v2/assets/{asset_id}/details",
+            timeout=6
+        )
+        if r.status_code == 200:
+            return r.json().get("Name", f"Asset#{asset_id}")
+    except Exception:
+        pass
+    return f"Asset#{asset_id}"
+
+
+# ─────────────────────────────────────────
+#  5. Tüm kaynakları birleştir
+# ─────────────────────────────────────────
+def get_full_rap(user_id):
+    """
+    Döner:
+      total_rap       : int
+      limited_count   : int
+      worn_count      : int   (avatar'da giyili limited sayısı)
+      extra_worn_rap  : int   (inventory'de olmayıp avatar'da bulunan limitedların RAP'i)
+      source          : str
+      private         : bool
+    """
+
+    # — Rolimons —
+    rolimons_rap = fetch_rolimons_rap(user_id)
+    time.sleep(0.2)
+
+    # — Roblox Inventory —
+    inventory = fetch_inventory_limiteds(user_id)
+    time.sleep(0.2)
+
+    private = inventory is None
+
+    # — Avatar (giyili itemlar) —
+    equipped = fetch_equipped_limiteds(user_id, inventory or {})
+
+    # Tüm itemları birleştir (inventory + sadece worn olanlar)
+    all_items = dict(inventory or {})
+    extra_worn_rap = 0
+    for aid, item in equipped.items():
+        if aid not in all_items:
+            all_items[aid] = item
+            extra_worn_rap += item["rap"]
+        else:
+            all_items[aid]["worn"] = True  # işaretle
+
+    total_rap     = sum(i["rap"] for i in all_items.values())
+    limited_count = len(all_items)
+    worn_count    = sum(1 for i in all_items.values() if i.get("worn"))
+
+    # Kaynak belirleme
+    if rolimons_rap and rolimons_rap > 0:
+        # Rolimons değeri varsa onu kullan (daha güvenilir genel RAP)
+        # ama worn itemları yine de ekle
+        final_rap = rolimons_rap + extra_worn_rap
+        source = "ROL+RBL" if extra_worn_rap > 0 else "ROLIMONS"
+    elif not private:
+        final_rap = total_rap
+        source = "RBL_INV" + ("+WORN" if extra_worn_rap > 0 else "")
     else:
-        print("    None found.")
+        # Envanter gizli ama avatar görünür olabilir
+        final_rap = extra_worn_rap
+        source = "WORN_ONLY" if extra_worn_rap > 0 else "PRIVATE"
 
+    return final_rap, limited_count, worn_count, source, private
+
+
+# ─────────────────────────────────────────
+#  6. Ana tarama
+# ─────────────────────────────────────────
+def scan_rich_members(members):
+    rich = []
+    total = len(members)
+
+    print(f"  [2/4] Scanning {total} members (Rolimons + Inventory + Avatar)...\n")
+
+    for i, m in enumerate(members, 1):
+        uid      = m["userId"]
+        username = m["username"]
+        role     = m["role"]
+
+        rap, lim_count, worn_count, source, private = get_full_rap(uid)
+
+        priv_tag = " [PRIVATE]" if private else ""
+        worn_tag = f" 👕{worn_count}" if worn_count > 0 else ""
+        status   = "✓ RICH" if rap >= RAP_THRESHOLD else "·"
+
+        print(f"  [{i:>4}/{total}] {username:<20} RAP: {rap:>10,}  [{source}]{worn_tag}{priv_tag}  {status}")
+
+        if rap >= RAP_THRESHOLD:
+            rich.append({
+                "username":   username,
+                "userId":     uid,
+                "role":       role,
+                "rap":        rap,
+                "lim_count":  lim_count,
+                "worn_count": worn_count,
+                "source":     source,
+                "private":    private,
+            })
+
+        time.sleep(0.5)
+
+    return rich
+
+
+# ─────────────────────────────────────────
+#  7. Çıktı
+# ─────────────────────────────────────────
+def print_results(rich):
+    print(f"\n{'─'*64}")
+    print(f"  RICH MEMBERS  (RAP ≥ {RAP_THRESHOLD:,})")
+    print(f"{'─'*64}")
+
+    if not rich:
+        print("  None found.")
+    else:
+        by_role = {}
+        for p in rich:
+            by_role.setdefault(p["role"], []).append(p)
+
+        for role, players in sorted(by_role.items()):
+            print(f"\n  ◆ {role}  ({len(players)} kişi)")
+            print(f"  {'─'*60}")
+            for p in sorted(players, key=lambda x: x["rap"], reverse=True):
+                worn_str  = f"  👕 {p['worn_count']} worn" if p["worn_count"] else ""
+                lim_str   = f"  💎 {p['lim_count']} limiteds" if p["lim_count"] else ""
+                priv_str  = "  🔒" if p["private"] else ""
+                src_str   = f"  [{p['source']}]"
+                print(f"    {p['username']:<22} RAP: {p['rap']:>10,}{lim_str}{worn_str}{priv_str}{src_str}")
+
+    print(f"\n{'─'*64}")
+    print(f"  SUMMARY")
+    print(f"{'─'*64}")
+    print(f"  Threshold   : {RAP_THRESHOLD:,} RAP")
+    print(f"  Rich members: {len(rich)}")
+    if rich:
+        private_count = sum(1 for p in rich if p["private"])
+        worn_detected = sum(1 for p in rich if p["worn_count"] > 0)
+        print(f"  Private inv : {private_count}  (avatar scan ile tespit edildi)")
+        print(f"  Worn items  : {worn_detected} kişide giyili limited bulundu")
+    print(f"{'─'*64}\n")
+
+
+# ─────────────────────────────────────────
 def main():
-    print("\n" + "─" * 46)
-    print("  Roblox Username Scanner")
-    print(f"  Group ID : {GROUP_ID}")
-    print("─" * 46)
-    print("\n  Scanning members, please wait...\n")
+    print("\n" + "─"*64)
+    print("  Roblox Rich Scanner  v3")
+    print("  Sources: Rolimons → Inventory API → Avatar API")
+    print(f"  Group ID  : {GROUP_ID}")
+    print(f"  Threshold : {RAP_THRESHOLD:,} RAP")
+    print("─"*64)
 
     try:
         members = fetch_members()
     except Exception as e:
-        print(f"  [ERROR] Connection failed: {e}")
+        print(f"  [ERROR] {e}")
         return
 
-    list_3l, list_4l = categorize(members)
+    print(f"  Total members found: {len(members)}\n")
 
-    print(f"  Scan complete. Total members: {len(members)}")
-
-    print_section("3-Letter Usernames", list_3l)
-    print_section("4-Letter Usernames", list_4l)
-
-    print("\n" + "─" * 46)
-    print("  Summary")
-    print("─" * 46)
-    print(f"  Total scanned  : {len(members)}")
-    print(f"  3L usernames   : {len(list_3l)}")
-    print(f"  4L usernames   : {len(list_4l)}")
-    print("─" * 46 + "\n")
+    rich = scan_rich_members(members)
+    print_results(rich)
 
 main()
