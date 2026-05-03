@@ -9,9 +9,9 @@ ROLE_ELITE   = "Elite"
 ROLE_TOPLINE = "Topline"
 
 THRESHOLDS = [
-    (15, ROLE_TOPLINE),
-    (10, ROLE_ELITE),
-    (5,  ROLE_PLUS),
+    (20, ROLE_TOPLINE),
+    (15, ROLE_ELITE),
+    (10, ROLE_PLUS),
 ]
 
 ROLE_RANK = {
@@ -20,13 +20,63 @@ ROLE_RANK = {
     ROLE_TOPLINE: 3,
 }
 
+PROTECTED_ROLES = {
+    "owner", "holder", "dev", "Uploaders",
+    "/", "word",
+    "––––– ٠水٠ –––––", "––––– ٠水٠ ––––—",
+    "—–––– ٠水٠ –––––", "—–––– ٠水٠ ––––—",
+}
+
+class C:
+    RESET   = "\033[0m"
+    BOLD    = "\033[1m"
+    DIM     = "\033[2m"
+    RED     = "\033[91m"
+    GREEN   = "\033[92m"
+    YELLOW  = "\033[93m"
+    BLUE    = "\033[94m"
+    MAGENTA = "\033[95m"
+    CYAN    = "\033[96m"
+    WHITE   = "\033[97m"
+    GRAY    = "\033[90m"
+    BG_DARK = "\033[40m"
+
+def line(char="─", n=62):
+    return char * n
+
+def header(text):
+    print(f"\n{C.CYAN}{C.BOLD}{line()}{C.RESET}")
+    print(f"{C.CYAN}{C.BOLD}  {text}{C.RESET}")
+    print(f"{C.CYAN}{line()}{C.RESET}")
+
+def section(text):
+    print(f"\n{C.YELLOW}{C.BOLD}  {text}{C.RESET}")
+    print(f"{C.YELLOW}  {line('─', 58)}{C.RESET}")
+
+def ok(text):
+    print(f"  {C.GREEN}✓{C.RESET} {text}")
+
+def warn(text):
+    print(f"  {C.YELLOW}⚠{C.RESET}  {text}")
+
+def err(text):
+    print(f"  {C.RED}✗{C.RESET}  {text}")
+
+def info(text):
+    print(f"  {C.CYAN}→{C.RESET} {text}")
+
+def role_color(role_name):
+    if role_name == ROLE_TOPLINE:
+        return f"{C.MAGENTA}{C.BOLD}{role_name}{C.RESET}"
+    elif role_name == ROLE_ELITE:
+        return f"{C.CYAN}{C.BOLD}{role_name}{C.RESET}"
+    elif role_name == ROLE_PLUS:
+        return f"{C.BLUE}{role_name}{C.RESET}"
+    return f"{C.GRAY}{role_name}{C.RESET}"
+
 session = requests.Session()
 
-# ─────────────────────────────────────────
-#  Yardımcı: güvenli GET (retry + json)
-# ─────────────────────────────────────────
 def safe_get(url, params=None, retries=5):
-    """500/429 alınca bekleyip tekrar dener. JSON döner veya None."""
     for attempt in range(retries):
         try:
             r = session.get(url, params=params, timeout=15)
@@ -34,22 +84,19 @@ def safe_get(url, params=None, retries=5):
                 return r.json()
             elif r.status_code in (429, 500):
                 wait = (attempt + 1) * 4
-                print(f"    [HTTP {r.status_code}] {wait}s bekleniyor... ({attempt+1}/{retries})")
+                print(f"  {C.YELLOW}  [{r.status_code}] {wait}s bekleniyor... ({attempt+1}/{retries}){C.RESET}")
                 time.sleep(wait)
             elif r.status_code == 403:
-                print(f"    [403] Erişim reddedildi: {url}")
+                err(f"Erişim reddedildi: {url}")
                 return None
             else:
-                print(f"    [HTTP {r.status_code}] {url}")
+                err(f"HTTP {r.status_code}")
                 return None
         except Exception as e:
-            print(f"    [HATA] {e}")
+            err(str(e))
             time.sleep(3)
     return None
 
-# ─────────────────────────────────────────
-#  Session
-# ─────────────────────────────────────────
 def setup_session(cookie):
     session.cookies.set(".ROBLOSECURITY", cookie, domain=".roblox.com")
     r = session.post("https://auth.roblox.com/v2/logout", timeout=10)
@@ -66,23 +113,18 @@ def verify_cookie():
         return d.get("name"), d.get("id")
     return None, None
 
-# ─────────────────────────────────────────
-#  1. Grup üyeleri
-# ─────────────────────────────────────────
 def fetch_group_members():
     members = {}
     cursor  = None
-    print("  [1/4] Grup üyeleri çekiliyor...")
+    info("Grup üyeleri çekiliyor...")
 
     while True:
         params = {"limit": 100, "sortOrder": "Asc"}
         if cursor:
             params["cursor"] = cursor
-
         data = safe_get(f"https://groups.roblox.com/v1/groups/{GROUP_ID}/users", params)
         if not data:
             break
-
         for m in data.get("data", []):
             uid = m["user"]["userId"]
             members[uid] = {
@@ -90,33 +132,26 @@ def fetch_group_members():
                 "role":     m["role"]["name"],
                 "roleId":   m["role"]["id"],
             }
-
         cursor = data.get("nextPageCursor")
         if not cursor:
             break
         time.sleep(0.5)
 
-    print(f"  → {len(members)} üye bulundu.")
+    ok(f"{len(members)} üye yüklendi.")
     return members
 
-# ─────────────────────────────────────────
-#  2. Grup rolleri
-# ─────────────────────────────────────────
 def fetch_group_roles():
     data = safe_get(f"https://groups.roblox.com/v1/groups/{GROUP_ID}/roles")
     if not data:
         return {}
     return {r["name"]: r["id"] for r in data.get("roles", [])}
 
-# ─────────────────────────────────────────
-#  3. Satış verisi
-# ─────────────────────────────────────────
 def fetch_sales_data():
     sales  = defaultdict(int)
     cursor = None
     page   = 0
     url    = f"https://economy.roblox.com/v2/groups/{GROUP_ID}/transactions"
-    print("  [2/4] Satış verisi çekiliyor (son ~30 gün)...")
+    info("Satış verisi çekiliyor (son ~30 gün)...")
 
     while True:
         params = {"limit": 100, "transactionType": "Sale"}
@@ -124,24 +159,20 @@ def fetch_sales_data():
             params["cursor"] = cursor
 
         data = safe_get(url, params)
-
         if data is None:
-            print("  [WARN] Satış API yanıt vermedi.")
+            warn("Satış API yanıt vermedi.")
             break
-
         if "errors" in data:
-            print(f"  [ERROR] {data['errors']}")
+            err(str(data["errors"]))
             break
 
         for tx in data.get("data", []):
-            # v2 API'de buyer ID olası tüm alanlar
             buyer_id = None
             agent = tx.get("agent")
             if isinstance(agent, dict):
                 buyer_id = agent.get("id")
             elif isinstance(agent, int):
                 buyer_id = agent
-
             if not buyer_id:
                 for field in ("purchaser", "buyer", "user"):
                     val = tx.get(field)
@@ -152,7 +183,6 @@ def fetch_sales_data():
                     elif isinstance(val, int):
                         buyer_id = val
                         break
-
             if buyer_id:
                 sales[buyer_id] += 1
 
@@ -160,27 +190,19 @@ def fetch_sales_data():
         cursor = data.get("nextPageCursor")
         if not cursor:
             break
-
         if page % 10 == 0:
-            print(f"    ... {page * 100} işlem tarandı, {len(sales)} alıcı bulundu")
+            print(f"  {C.GRAY}  ... {page * 100} işlem tarandı, {len(sales)} alıcı{C.RESET}")
+        time.sleep(1.2)
 
-        time.sleep(1.2)  # rate limit koruması
-
-    print(f"  → Toplam {len(sales)} alıcı, {page * 100} işlem tarandı.")
+    ok(f"{len(sales)} alıcı bulundu ({page * 100} işlem tarandı).")
     return dict(sales)
 
-# ─────────────────────────────────────────
-#  4. Hedef rol hesapla
-# ─────────────────────────────────────────
 def calculate_target_role(count):
     for threshold, role_name in THRESHOLDS:
         if count >= threshold:
             return role_name
     return None
 
-# ─────────────────────────────────────────
-#  5. Rol ver
-# ─────────────────────────────────────────
 def assign_role(user_id, role_id, username, dry_run):
     if dry_run:
         return True
@@ -192,21 +214,17 @@ def assign_role(user_id, role_id, username, dry_run):
         )
         if r.status_code == 200:
             return True
-        print(f"    [WARN] {username} → {r.status_code}: {r.text[:80]}")
+        warn(f"{username} → {r.status_code}: {r.text[:80]}")
         return False
     except Exception as e:
-        print(f"    [ERROR] {username}: {e}")
+        err(f"{username}: {e}")
         return False
 
-# ─────────────────────────────────────────
-#  6. Analiz
-# ─────────────────────────────────────────
 def process_roles(members, sales, group_roles):
     to_assign  = []
     skipped    = []
+    protected  = []
     not_member = []
-
-    print(f"\n  [3/4] {len(sales)} alıcı analiz ediliyor...")
 
     for buyer_id, count in sales.items():
         if buyer_id not in members:
@@ -217,121 +235,126 @@ def process_roles(members, sales, group_roles):
         username     = m["username"]
         current_role = m["role"]
         current_rank = ROLE_RANK.get(current_role, 0)
-        target_role  = calculate_target_role(count)
 
+        if current_role in PROTECTED_ROLES:
+            protected.append((username, count, current_role))
+            continue
+
+        target_role = calculate_target_role(count)
         if target_role is None:
-            skipped.append((username, count, "eşik karşılanmadı (<5)"))
+            skipped.append((username, count, "eşik karşılanmadı (<10)"))
             continue
 
         target_rank = ROLE_RANK.get(target_role, 0)
-
         if current_rank >= target_rank:
             skipped.append((username, count, f"zaten {current_role}"))
             continue
 
         to_assign.append((buyer_id, username, current_role, target_role, count))
 
-    return to_assign, skipped, not_member
+    return to_assign, skipped, protected, not_member
 
-# ─────────────────────────────────────────
-#  7. Rapor
-# ─────────────────────────────────────────
-def print_plan(to_assign, skipped, not_member):
-    print(f"\n{'─'*60}")
-    print(f"  *** DRY RUN — Henüz hiçbir şey değişmedi ***")
-    print(f"{'─'*60}")
+def print_plan(to_assign, skipped, protected, not_member):
+    print(f"\n{C.CYAN}{line()}{C.RESET}")
+    print(f"{C.CYAN}{C.BOLD}  DRY RUN  —  Henüz hiçbir şey değişmedi{C.RESET}")
+    print(f"{C.CYAN}{line()}{C.RESET}")
 
-    print(f"\n  ROL VERİLECEKLER  ({len(to_assign)} kişi)")
-    print(f"  {'─'*56}")
+    section(f"ROL VERİLECEKLER  ({len(to_assign)} kişi)")
     if to_assign:
         for _, uname, cur, tgt, cnt in sorted(to_assign, key=lambda x: x[4], reverse=True):
-            print(f"    {uname:<22} {cnt:>3} kıyafet   {cur} → {tgt}")
+            bar = "█" * min(cnt, 20)
+            print(f"    {C.WHITE}{uname:<24}{C.RESET} "
+                  f"{C.YELLOW}{cnt:>3} kıyafet{C.RESET}  "
+                  f"{C.GRAY}{bar:<20}{C.RESET}  "
+                  f"{C.GRAY}{cur}{C.RESET} {C.DIM}→{C.RESET} {role_color(tgt)}")
     else:
-        print("    Kimse yok.")
+        print(f"    {C.GRAY}Kimse yok.{C.RESET}")
 
-    print(f"\n  ATLANACAKLAR  ({len(skipped)} kişi)")
-    print(f"  {'─'*56}")
-    for uname, cnt, reason in skipped[:15]:
-        print(f"    {uname:<22} {cnt:>3} kıyafet   ({reason})")
-    if len(skipped) > 15:
-        print(f"    ... ve {len(skipped)-15} kişi daha")
+    section(f"KORUNAN ROLLER  ({len(protected)} kişi — dokunulmayacak)")
+    for uname, cnt, role in protected[:10]:
+        print(f"    {C.RED}🔒{C.RESET} {C.WHITE}{uname:<24}{C.RESET} "
+              f"{C.YELLOW}{cnt:>3} kıyafet{C.RESET}  "
+              f"{C.RED}{role}{C.RESET}")
+    if len(protected) > 10:
+        print(f"    {C.GRAY}... ve {len(protected)-10} kişi daha{C.RESET}")
 
-    print(f"\n  GRUPTA OLMAYAN ALICILAR: {len(not_member)} (atlandı)")
-    print(f"{'─'*60}\n")
+    section(f"ATLANACAKLAR  ({len(skipped)} kişi)")
+    for uname, cnt, reason in skipped[:12]:
+        print(f"    {C.GRAY}{uname:<24} {cnt:>3} kıyafet   ({reason}){C.RESET}")
+    if len(skipped) > 12:
+        print(f"    {C.GRAY}... ve {len(skipped)-12} kişi daha{C.RESET}")
 
-# ─────────────────────────────────────────
-#  MAIN
-# ─────────────────────────────────────────
+    print(f"\n  {C.GRAY}Grupta olmayan alıcılar: {len(not_member)} (atlandı){C.RESET}")
+    print(f"{C.CYAN}{line()}{C.RESET}\n")
+
 def main():
-    print("\n" + "─"*60)
-    print("  Roblox Auto Role Bot  v4")
-    print(f"  Group: {GROUP_ID}")
-    print(f"  5+ → {ROLE_PLUS}  |  10+ → {ROLE_ELITE}  |  15+ → {ROLE_TOPLINE}")
-    print("─"*60)
+    header("Roblox Auto Role Bot  v5")
+    print(f"  {C.GRAY}Group  : {GROUP_ID}{C.RESET}")
+    print(f"  {C.BLUE}10+{C.RESET} → {role_color(ROLE_PLUS)}   "
+          f"{C.CYAN}15+{C.RESET} → {role_color(ROLE_ELITE)}   "
+          f"{C.MAGENTA}20+{C.RESET} → {role_color(ROLE_TOPLINE)}")
 
-    cookie = getpass.getpass("\n  .ROBLOSECURITY → ")
+    cookie = getpass.getpass(f"\n  {C.CYAN}.ROBLOSECURITY →{C.RESET} ")
 
-    print("\n  Oturum açılıyor...")
+    print(f"\n  {C.DIM}Oturum açılıyor...{C.RESET}")
     if not setup_session(cookie.strip()):
-        print("  [ERROR] CSRF token alınamadı.")
+        err("CSRF token alınamadı.")
         return
 
     name, uid = verify_cookie()
     if not name:
-        print("  [ERROR] Cookie geçersiz.")
+        err("Cookie geçersiz veya süresi dolmuş.")
         return
-    print(f"  ✓ Giriş: {name} (ID: {uid})")
+    ok(f"Giriş yapıldı: {C.WHITE}{C.BOLD}{name}{C.RESET} {C.GRAY}(ID: {uid}){C.RESET}")
 
+    print()
     members     = fetch_group_members()
     sales       = fetch_sales_data()
     group_roles = fetch_group_roles()
 
     if not sales:
-        print("\n  [ERROR] Satış verisi alınamadı veya boş.")
-        print("  Olası nedenler:")
-        print("  - Son 30 günde hiç satış yok")
-        print("  - API geçici olarak yanıt vermiyor (birkaç dakika bekle)")
+        err("Satış verisi alınamadı veya son 30 günde satış yok.")
         return
 
-    print(f"\n  Grup üyesi  : {len(members)}")
-    print(f"  Satış yapan : {len(sales)}")
-    print(f"  Roller      : {list(group_roles.keys())}")
+    print(f"\n  {C.GRAY}Grup üyesi: {len(members)}  |  Satış yapan: {len(sales)}{C.RESET}")
 
     missing = [r for r in [ROLE_PLUS, ROLE_ELITE, ROLE_TOPLINE] if r not in group_roles]
     if missing:
-        print(f"\n  [ERROR] Grupta bulunamayan roller: {missing}")
-        print("  Script'in üstündeki ROLE_PLUS/ELITE/TOPLINE değerlerini")
-        print("  grubundaki EXACT isimlerle değiştir!")
+        err(f"Grupta bulunamayan roller: {missing}")
+        err("ROLE_PLUS / ROLE_ELITE / ROLE_TOPLINE değerlerini script'in üstünde düzelt!")
         return
 
-    to_assign, skipped, not_member = process_roles(members, sales, group_roles)
-    print_plan(to_assign, skipped, not_member)
+    to_assign, skipped, protected, not_member = process_roles(members, sales, group_roles)
+    print_plan(to_assign, skipped, protected, not_member)
 
     if not to_assign:
-        print("  Verilecek yeni rol yok.\n")
+        info("Verilecek yeni rol yok.")
         return
 
-    print(f"  {len(to_assign)} kişiye rol verilecek.")
-    confirm = input("  Onayla [evet/hayir]: ").strip().lower()
+    print(f"  {C.BOLD}{C.WHITE}{len(to_assign)} kişiye rol verilecek.{C.RESET}")
+    confirm = input(f"  {C.YELLOW}Onayla [evet/hayir]:{C.RESET} ").strip().lower()
 
     if confirm != "evet":
-        print("\n  İptal. Hiçbir şey değişmedi.\n")
+        warn("İptal edildi. Hiçbir şey değişmedi.")
         return
 
-    print(f"\n  [4/4] Roller veriliyor...\n")
+    section("Roller veriliyor...")
     success = fail = 0
 
     for uid, uname, cur, tgt, cnt in to_assign:
-        ok = assign_role(uid, group_roles[tgt], uname, dry_run=False)
-        if ok:
-            print(f"    ✓ {uname:<22} → {tgt}  ({cnt} kıyafet)")
+        ok_flag = assign_role(uid, group_roles[tgt], uname, dry_run=False)
+        if ok_flag:
+            print(f"    {C.GREEN}✓{C.RESET} {C.WHITE}{uname:<24}{C.RESET} "
+                  f"{C.GRAY}{cur}{C.RESET} → {role_color(tgt)}  "
+                  f"{C.GRAY}({cnt} kıyafet){C.RESET}")
             success += 1
         else:
+            print(f"    {C.RED}✗{C.RESET} {C.WHITE}{uname:<24}{C.RESET} {C.RED}başarısız{C.RESET}")
             fail += 1
         time.sleep(0.7)
 
-    print(f"\n{'─'*60}")
-    print(f"  Başarılı : {success}  |  Başarısız : {fail}")
-    print(f"{'─'*60}\n")
+    print(f"\n{C.CYAN}{line()}{C.RESET}")
+    print(f"  {C.GREEN}{C.BOLD}Başarılı : {success}{C.RESET}   {C.RED}Başarısız : {fail}{C.RESET}")
+    print(f"{C.CYAN}{line()}{C.RESET}\n")
 
 main()
