@@ -3,11 +3,11 @@ import time
 import getpass
 from collections import defaultdict
 
-GROUP_ID      = 827675604
-ROLE_PLUS     = "Plus"
-ROLE_ELITE    = "Elite"
-ROLE_TOPLINE  = "Topline"
-ROLE_CHANCE   = "/one more chance" # Yeni eklenen rol
+GROUP_ID          = 827675604
+ROLE_NEWCOMER     = "/one more chance"
+ROLE_PLUS         = "Plus"
+ROLE_ELITE        = "Elite"
+ROLE_TOPLINE      = "Topline"
 
 THRESHOLDS = [
     (20, ROLE_TOPLINE),
@@ -19,24 +19,35 @@ ROLE_RANK = {
     ROLE_PLUS:    1,
     ROLE_ELITE:   2,
     ROLE_TOPLINE: 3,
-    ROLE_CHANCE:  0, # En alt yetki seviyesi
 }
 
-# Korunan roller (Script bu rollere sahip kişilere dokunmaz)
+SALES_ROLES = {ROLE_PLUS, ROLE_ELITE, ROLE_TOPLINE}
+
 PROTECTED_ROLES = {
     "owner", "holder", "dev", "Uploaders",
-    "/", "word", "4L - 4C", "3L - 3C",
+    "/", "word",
+    "4L - 4C", "3L - 3C",
     "––––– ٠水٠ –––––", "––––– ٠水٠ ––––—",
     "—–––– ٠水٠ –––––", "—–––– ٠水٠ ––––—",
 }
 
-class C:
-    RESET   = "\033[0m"; BOLD = "\033[1m"; DIM = "\033[2m"
-    RED     = "\033[91m"; GREEN = "\033[92m"; YELLOW = "\033[93m"
-    BLUE    = "\033[94m"; MAGENTA = "\033[95m"; CYAN = "\033[96m"
-    WHITE   = "\033[97m"; GRAY = "\033[90m"
+NEWCOMER_ELIGIBLE = {"Guest", "/one more chance."}
 
-def line(char="─", n=62): return char * n
+class C:
+    RESET   = "\033[0m"
+    BOLD    = "\033[1m"
+    DIM     = "\033[2m"
+    RED     = "\033[91m"
+    GREEN   = "\033[92m"
+    YELLOW  = "\033[93m"
+    BLUE    = "\033[94m"
+    MAGENTA = "\033[95m"
+    CYAN    = "\033[96m"
+    WHITE   = "\033[97m"
+    GRAY    = "\033[90m"
+
+def line(char="─", n=62):
+    return char * n
 
 def header(text):
     print(f"\n{C.CYAN}{C.BOLD}{line()}{C.RESET}")
@@ -47,16 +58,20 @@ def section(text):
     print(f"\n{C.YELLOW}{C.BOLD}  {text}{C.RESET}")
     print(f"{C.YELLOW}  {line('─', 58)}{C.RESET}")
 
-def ok(text): print(f"  {C.GREEN}✓{C.RESET} {text}")
+def ok(text):   print(f"  {C.GREEN}✓{C.RESET} {text}")
 def warn(text): print(f"  {C.YELLOW}⚠{C.RESET}  {text}")
-def err(text): print(f"  {C.RED}✗{C.RESET}  {text}")
+def err(text):  print(f"  {C.RED}✗{C.RESET}  {text}")
 def info(text): print(f"  {C.CYAN}→{C.RESET} {text}")
 
 def role_color(role_name):
-    if role_name == ROLE_TOPLINE: return f"{C.MAGENTA}{C.BOLD}{role_name}{C.RESET}"
-    if role_name == ROLE_ELITE: return f"{C.CYAN}{C.BOLD}{role_name}{C.RESET}"
-    if role_name == ROLE_PLUS: return f"{C.BLUE}{role_name}{C.RESET}"
-    if role_name == ROLE_CHANCE: return f"{C.WHITE}{role_name}{C.RESET}"
+    if role_name == ROLE_TOPLINE:
+        return f"{C.MAGENTA}{C.BOLD}{role_name}{C.RESET}"
+    elif role_name == ROLE_ELITE:
+        return f"{C.CYAN}{C.BOLD}{role_name}{C.RESET}"
+    elif role_name == ROLE_PLUS:
+        return f"{C.BLUE}{role_name}{C.RESET}"
+    elif role_name == ROLE_NEWCOMER:
+        return f"{C.GREEN}{role_name}{C.RESET}"
     return f"{C.GRAY}{role_name}{C.RESET}"
 
 session = requests.Session()
@@ -65,16 +80,26 @@ def safe_get(url, params=None, retries=5):
     for attempt in range(retries):
         try:
             r = session.get(url, params=params, timeout=15)
-            if r.status_code == 200: return r.json()
+            if r.status_code == 200 and r.text:
+                return r.json()
             elif r.status_code in (429, 500):
-                time.sleep((attempt + 1) * 3)
-            else: return None
-        except: time.sleep(2)
+                wait = (attempt + 1) * 4
+                print(f"  {C.YELLOW}  [{r.status_code}] {wait}s bekleniyor... ({attempt+1}/{retries}){C.RESET}")
+                time.sleep(wait)
+            elif r.status_code == 403:
+                err("Erişim reddedildi.")
+                return None
+            else:
+                err(f"HTTP {r.status_code}")
+                return None
+        except Exception as e:
+            err(str(e))
+            time.sleep(3)
     return None
 
 def setup_session(cookie):
     session.cookies.set(".ROBLOSECURITY", cookie, domain=".roblox.com")
-    r = session.post("https://auth.roblox.com/v2/logout")
+    r = session.post("https://auth.roblox.com/v2/logout", timeout=10)
     csrf = r.headers.get("x-csrf-token")
     if csrf:
         session.headers.update({"x-csrf-token": csrf})
@@ -82,141 +107,296 @@ def setup_session(cookie):
     return False
 
 def verify_cookie():
-    r = session.get("https://users.roblox.com/v1/users/authenticated")
+    r = session.get("https://users.roblox.com/v1/users/authenticated", timeout=10)
     if r.status_code == 200:
-        return r.json().get("name"), r.json().get("id")
+        d = r.json()
+        return d.get("name"), d.get("id")
     return None, None
 
 def fetch_group_members():
     members = {}
-    cursor = None
+    cursor  = None
     info("Grup üyeleri çekiliyor...")
     while True:
         params = {"limit": 100, "sortOrder": "Asc"}
-        if cursor: params["cursor"] = cursor
+        if cursor:
+            params["cursor"] = cursor
         data = safe_get(f"https://groups.roblox.com/v1/groups/{GROUP_ID}/users", params)
-        if not data: break
+        if not data:
+            break
         for m in data.get("data", []):
-            members[m["user"]["userId"]] = {
+            uid = m["user"]["userId"]
+            members[uid] = {
                 "username": m["user"]["username"],
-                "role": m["role"]["name"],
-                "roleId": m["role"]["id"]
+                "role":     m["role"]["name"],
+                "roleId":   m["role"]["id"],
             }
         cursor = data.get("nextPageCursor")
-        if not cursor: break
+        if not cursor:
+            break
+        time.sleep(0.5)
     ok(f"{len(members)} üye yüklendi.")
     return members
 
 def fetch_group_roles():
     data = safe_get(f"https://groups.roblox.com/v1/groups/{GROUP_ID}/roles")
-    return {r["name"]: r["id"] for r in data.get("roles", [])} if data else {}
+    if not data:
+        return {}
+    return {r["name"]: r["id"] for r in data.get("roles", [])}
 
 def fetch_sales_data():
-    sales = defaultdict(int)
+    sales  = defaultdict(int)
     cursor = None
-    page = 0
-    info("Satış verileri analiz ediliyor...")
-    while page < 50: # Limit (İsteğe göre artırılabilir)
+    page   = 0
+    url    = f"https://economy.roblox.com/v2/groups/{GROUP_ID}/transactions"
+    info("Satış verisi çekiliyor (son 30 gün)...")
+    while True:
         params = {"limit": 100, "transactionType": "Sale"}
-        if cursor: params["cursor"] = cursor
-        data = safe_get(f"https://economy.roblox.com/v2/groups/{GROUP_ID}/transactions", params)
-        if not data or "data" not in data: break
-        for tx in data["data"]:
-            buyer_id = tx.get("agent", {}).get("id")
-            if buyer_id: sales[buyer_id] += 1
+        if cursor:
+            params["cursor"] = cursor
+        data = safe_get(url, params)
+        if data is None:
+            warn("Satış API yanıt vermedi.")
+            break
+        if "errors" in data:
+            err(str(data["errors"]))
+            break
+        for tx in data.get("data", []):
+            buyer_id = None
+            agent = tx.get("agent")
+            if isinstance(agent, dict):
+                buyer_id = agent.get("id")
+            elif isinstance(agent, int):
+                buyer_id = agent
+            if not buyer_id:
+                for field in ("purchaser", "buyer", "user"):
+                    val = tx.get(field)
+                    if isinstance(val, dict):
+                        buyer_id = val.get("id") or val.get("userId")
+                        if buyer_id:
+                            break
+                    elif isinstance(val, int):
+                        buyer_id = val
+                        break
+            if buyer_id:
+                sales[buyer_id] += 1
+        page  += 1
         cursor = data.get("nextPageCursor")
-        page += 1
-        if not cursor: break
-    ok(f"Satış verileri hazır.")
-    return sales
+        if not cursor:
+            break
+        if page % 10 == 0:
+            print(f"  {C.GRAY}  ... {page * 100} işlem, {len(sales)} alıcı{C.RESET}")
+        time.sleep(1.2)
+    ok(f"{len(sales)} alıcı, {page * 100} işlem tarandı.")
+    return dict(sales)
 
-def assign_role(user_id, role_id):
+def calculate_target_role(count):
+    for threshold, role_name in THRESHOLDS:
+        if count >= threshold:
+            return role_name
+    return None
+
+def assign_role(user_id, role_id, username, dry_run):
+    if dry_run:
+        return True
     try:
-        r = session.patch(f"https://groups.roblox.com/v1/groups/{GROUP_ID}/users/{user_id}", 
-                          json={"roleId": role_id})
-        return r.status_code == 200
-    except: return False
+        r = session.patch(
+            f"https://groups.roblox.com/v1/groups/{GROUP_ID}/users/{user_id}",
+            json={"roleId": role_id},
+            timeout=10
+        )
+        if r.status_code == 200:
+            return True
+        warn(f"{username} → {r.status_code}: {r.text[:80]}")
+        return False
+    except Exception as e:
+        err(f"{username}: {e}")
+        return False
 
-def process_logic(members, sales, group_roles):
-    to_assign = []
-    
-    # Gruptaki her üye için kontrol yap
+def process_roles(members, sales):
+    upgrades   = []
+    downgrades = []
+    newcomers  = []
+    protected  = []
+    skipped    = []
+
     for uid, m in members.items():
-        username = m["username"]
+        username     = m["username"]
         current_role = m["role"]
-        count = sales.get(uid, 0)
-        
-        # 1. Koruma Listesi Kontrolü
+        count        = sales.get(uid, 0)
+
         if current_role in PROTECTED_ROLES:
+            protected.append((username, count, current_role))
             continue
 
-        # 2. Satın Alma Threshold Kontrolü
-        target_role = None
-        for threshold, r_name in THRESHOLDS:
-            if count >= threshold:
-                target_role = r_name
-                break
-        
-        # 3. Eğer satın alma yoksa veya threshold altındaysa /one more chance rolü kontrolü
-        if target_role is None:
-            # Eğer halihazırda bir rütbesi yoksa (örneğin "Member" ise) bu rolü ver
-            if current_role not in ROLE_RANK: 
-                target_role = ROLE_CHANCE
-        
-        # 4. Değişiklik Gerekli mi?
-        if target_role:
-            current_rank = ROLE_RANK.get(current_role, -1)
-            target_rank = ROLE_RANK.get(target_role, -1)
-            
-            if target_rank > current_rank:
-                to_assign.append((uid, username, current_role, target_role, count))
+        if current_role in NEWCOMER_ELIGIBLE:
+            newcomers.append((uid, username, current_role, count))
+            continue
 
-    return to_assign
+        if current_role in SALES_ROLES:
+            current_rank = ROLE_RANK[current_role]
+            target_role  = calculate_target_role(count)
+
+            if target_role is None:
+                downgrades.append((uid, username, current_role, ROLE_NEWCOMER, count,
+                                   "satış eşiği altında (<10)"))
+            else:
+                target_rank = ROLE_RANK[target_role]
+                if target_rank > current_rank:
+                    upgrades.append((uid, username, current_role, target_role, count))
+                elif target_rank < current_rank:
+                    downgrades.append((uid, username, current_role, target_role, count,
+                                       f"satış düştü ({count} kıyafet)"))
+                else:
+                    skipped.append((username, count, f"zaten {current_role}"))
+            continue
+
+        skipped.append((username, count, f"takip edilmiyor ({current_role})"))
+
+    return upgrades, downgrades, newcomers, protected, skipped
+
+def print_plan(upgrades, downgrades, newcomers, protected, skipped):
+    print(f"\n{C.CYAN}{line()}{C.RESET}")
+    print(f"{C.CYAN}{C.BOLD}  DRY RUN  —  Henüz hiçbir şey değişmedi{C.RESET}")
+    print(f"{C.CYAN}{line()}{C.RESET}")
+
+    section(f"YÜKSELTİLECEKLER  ({len(upgrades)} kişi)")
+    if upgrades:
+        for _, uname, cur, tgt, cnt in sorted(upgrades, key=lambda x: x[4], reverse=True):
+            bar = "█" * min(cnt, 20)
+            print(f"    {C.WHITE}{uname:<24}{C.RESET} "
+                  f"{C.YELLOW}{cnt:>3} kıyafet{C.RESET}  "
+                  f"{C.GRAY}{bar:<20}{C.RESET}  "
+                  f"{role_color(cur)} {C.DIM}→{C.RESET} {role_color(tgt)}")
+    else:
+        print(f"    {C.GRAY}Kimse yok.{C.RESET}")
+
+    section(f"DÜŞÜRÜLECEKLER  ({len(downgrades)} kişi — satış düşük)")
+    if downgrades:
+        for _, uname, cur, tgt, cnt, reason in sorted(downgrades, key=lambda x: x[4]):
+            print(f"    {C.RED}↓{C.RESET} {C.WHITE}{uname:<24}{C.RESET} "
+                  f"{C.YELLOW}{cnt:>3} kıyafet{C.RESET}  "
+                  f"{role_color(cur)} {C.DIM}→{C.RESET} {role_color(tgt)}  "
+                  f"{C.GRAY}({reason}){C.RESET}")
+    else:
+        print(f"    {C.GRAY}Kimse yok.{C.RESET}")
+
+    section(f"YENİ ÜYELER  ({len(newcomers)} kişi  →  {ROLE_NEWCOMER})")
+    if newcomers:
+        for _, uname, cur, cnt in newcomers[:15]:
+            tag = f"{C.YELLOW}{cnt} kıyafet{C.RESET}" if cnt > 0 else f"{C.GRAY}satış yok{C.RESET}"
+            print(f"    {C.GREEN}+{C.RESET} {C.WHITE}{uname:<24}{C.RESET}  {tag}  "
+                  f"{C.GRAY}{cur}{C.RESET} {C.DIM}→{C.RESET} {role_color(ROLE_NEWCOMER)}")
+        if len(newcomers) > 15:
+            print(f"    {C.GRAY}... ve {len(newcomers)-15} kişi daha{C.RESET}")
+    else:
+        print(f"    {C.GRAY}Kimse yok.{C.RESET}")
+
+    section(f"KORUNAN ROLLER  ({len(protected)} kişi — dokunulmayacak)")
+    for uname, cnt, role in protected[:10]:
+        print(f"    {C.RED}🔒{C.RESET} {C.WHITE}{uname:<24}{C.RESET} "
+              f"{C.YELLOW}{cnt:>3} kıyafet{C.RESET}  {C.RED}{role}{C.RESET}")
+    if len(protected) > 10:
+        print(f"    {C.GRAY}... ve {len(protected)-10} kişi daha{C.RESET}")
+
+    section(f"ATLANACAKLAR  ({len(skipped)} kişi)")
+    for uname, cnt, reason in skipped[:10]:
+        print(f"    {C.GRAY}{uname:<24} {cnt:>3} kıyafet   ({reason}){C.RESET}")
+    if len(skipped) > 10:
+        print(f"    {C.GRAY}... ve {len(skipped)-10} kişi daha{C.RESET}")
+
+    total = len(upgrades) + len(downgrades) + len(newcomers)
+    print(f"\n{C.CYAN}{line()}{C.RESET}")
+    print(f"  {C.BOLD}Toplam değişiklik: {total}{C.RESET}   "
+          f"{C.GREEN}↑ {len(upgrades)} yükseltme{C.RESET}   "
+          f"{C.RED}↓ {len(downgrades)} düşürme{C.RESET}   "
+          f"{C.GREEN}+ {len(newcomers)} yeni üye{C.RESET}")
+    print(f"{C.CYAN}{line()}{C.RESET}\n")
+
+def apply_changes(upgrades, downgrades, newcomers, group_roles):
+    success = fail = 0
+
+    all_changes = (
+        [(uid, uname, cur, tgt, cnt, "↑") for uid, uname, cur, tgt, cnt in upgrades] +
+        [(uid, uname, cur, tgt, cnt, "↓") for uid, uname, cur, tgt, cnt, _ in downgrades] +
+        [(uid, uname, cur, ROLE_NEWCOMER, cnt, "+") for uid, uname, cur, cnt in newcomers]
+    )
+
+    for uid, uname, cur, tgt, cnt, arrow in all_changes:
+        if tgt not in group_roles:
+            err(f"Rol bulunamadı: {tgt}")
+            fail += 1
+            continue
+        ok_flag = assign_role(uid, group_roles[tgt], uname, dry_run=False)
+        if ok_flag:
+            color = C.GREEN if arrow in ("↑", "+") else C.RED
+            print(f"    {color}{arrow}{C.RESET} {C.WHITE}{uname:<24}{C.RESET} "
+                  f"{role_color(cur)} {C.DIM}→{C.RESET} {role_color(tgt)}  "
+                  f"{C.GRAY}({cnt} kıyafet){C.RESET}")
+            success += 1
+        else:
+            print(f"    {C.RED}✗{C.RESET} {C.WHITE}{uname:<24}{C.RESET} {C.RED}başarısız{C.RESET}")
+            fail += 1
+        time.sleep(0.7)
+
+    return success, fail
 
 def main():
-    header("Roblox Auto Role Bot v5.1")
-    cookie = getpass.getpass(f"  {C.CYAN}.ROBLOSECURITY →{C.RESET} ")
-    
+    header("Roblox Auto Role Bot  v6")
+    print(f"  {C.GRAY}Group  : {GROUP_ID}{C.RESET}")
+    print(f"  {C.BLUE}10+{C.RESET} → {role_color(ROLE_PLUS)}   "
+          f"{C.CYAN}15+{C.RESET} → {role_color(ROLE_ELITE)}   "
+          f"{C.MAGENTA}20+{C.RESET} → {role_color(ROLE_TOPLINE)}")
+    print(f"  {C.GREEN}Guest / rolsüz{C.RESET} → {role_color(ROLE_NEWCOMER)}")
+    print(f"  {C.RED}Korunan: owner holder dev 3L-3C 4L-4C / ...{C.RESET}")
+
+    cookie = getpass.getpass(f"\n  {C.CYAN}.ROBLOSECURITY →{C.RESET} ")
+
+    print(f"\n  {C.DIM}Oturum açılıyor...{C.RESET}")
     if not setup_session(cookie.strip()):
-        err("Giriş başarısız."); return
+        err("CSRF token alınamadı.")
+        return
 
-    name, _ = verify_cookie()
+    name, uid = verify_cookie()
     if not name:
-        err("Cookie geçersiz."); return
-    ok(f"Giriş yapıldı: {name}")
+        err("Cookie geçersiz veya süresi dolmuş.")
+        return
+    ok(f"Giriş yapıldı: {C.WHITE}{C.BOLD}{name}{C.RESET} {C.GRAY}(ID: {uid}){C.RESET}")
 
-    members = fetch_group_members()
-    sales = fetch_sales_data()
-    roles = fetch_group_roles()
+    print()
+    members     = fetch_group_members()
+    sales       = fetch_sales_data()
+    group_roles = fetch_group_roles()
 
-    if ROLE_CHANCE not in roles:
-        err(f"Grupta '{ROLE_CHANCE}' isimli bir rol bulunamadı!")
+    if not members:
+        err("Üye listesi alınamadı.")
         return
 
-    to_assign = process_logic(members, sales, roles)
-
-    if not to_assign:
-        info("Güncellenecek üye bulunamadı.")
+    missing = [r for r in [ROLE_PLUS, ROLE_ELITE, ROLE_TOPLINE, ROLE_NEWCOMER] if r not in group_roles]
+    if missing:
+        err(f"Grupta bulunamayan roller: {missing}")
         return
 
-    section(f"Planlanan Değişiklikler ({len(to_assign)} kişi)")
-    for _, uname, cur, tgt, cnt in to_assign[:20]:
-        print(f"    {uname:<20} {C.GRAY}{cur}{C.RESET} → {role_color(tgt)} ({cnt} alım)")
-    
-    if len(to_assign) > 20: print(f"    ... ve {len(to_assign)-20} kişi daha.")
+    print(f"\n  {C.GRAY}Üye: {len(members)}  |  Satış yapan: {len(sales)}{C.RESET}")
 
-    confirm = input(f"\n  {C.YELLOW}Onaylıyor musunuz? [evet/hayir]:{C.RESET} ").lower()
-    if confirm != "evet": return
+    upgrades, downgrades, newcomers, protected, skipped = process_roles(members, sales)
+    print_plan(upgrades, downgrades, newcomers, protected, skipped)
 
-    section("İşlem başlatıldı...")
-    for uid, uname, _, tgt, _ in to_assign:
-        if assign_role(uid, roles[tgt]):
-            print(f"    {C.GREEN}✓{C.RESET} {uname} → {tgt}")
-        else:
-            print(f"    {C.RED}✗{C.RESET} {uname} başarısız.")
-        time.sleep(0.8)
+    total = len(upgrades) + len(downgrades) + len(newcomers)
+    if total == 0:
+        info("Yapılacak değişiklik yok.")
+        return
 
-    ok("Tamamlandı.")
+    confirm = input(f"  {C.YELLOW}Onayla [evet/hayir]:{C.RESET} ").strip().lower()
+    if confirm != "evet":
+        warn("İptal edildi. Hiçbir şey değişmedi.")
+        return
 
-if __name__ == "__main__":
-    main()
+    section("Değişiklikler uygulanıyor...")
+    success, fail = apply_changes(upgrades, downgrades, newcomers, group_roles)
+
+    print(f"\n{C.CYAN}{line()}{C.RESET}")
+    print(f"  {C.GREEN}{C.BOLD}Başarılı : {success}{C.RESET}   {C.RED}Başarısız : {fail}{C.RESET}")
+    print(f"{C.CYAN}{line()}{C.RESET}\n")
+
+main()
