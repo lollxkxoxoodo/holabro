@@ -1,137 +1,54 @@
 import requests
 import time
 import getpass
-from collections import defaultdict
-from datetime import datetime
 
-GROUP_ID = 827675604
+GROUP_ID      = 827675604
+RAP_THRESHOLD = 500_000
 
 class C:
     RESET   = "\033[0m"
     BOLD    = "\033[1m"
+    DIM     = "\033[2m"
     RED     = "\033[91m"
     GREEN   = "\033[92m"
     YELLOW  = "\033[93m"
     CYAN    = "\033[96m"
+    MAGENTA = "\033[95m"
     WHITE   = "\033[97m"
     GRAY    = "\033[90m"
-    MAGENTA = "\033[95m"
+
+def fmt(v):
+    if v >= 1_000_000:
+        return f"{v/1_000_000:.1f}M"
+    elif v >= 1_000:
+        return f"{v/1_000:.1f}K"
+    return str(v)
 
 session = requests.Session()
+session.headers.update({"User-Agent": "Mozilla/5.0"})
 
-def setup_session(cookie):
+def safe_get(url, params=None, retries=4):
+    for attempt in range(retries):
+        try:
+            r = session.get(url, params=params, timeout=10)
+            if r.status_code == 200 and r.text:
+                return r.json()
+            elif r.status_code == 429:
+                time.sleep((attempt + 1) * 3)
+            else:
+                return None
+        except Exception:
+            time.sleep(2)
+    return None
+
+def fetch_group_members(cookie):
     session.cookies.set(".ROBLOSECURITY", cookie, domain=".roblox.com")
     r = session.post("https://auth.roblox.com/v2/logout", timeout=10)
     csrf = r.headers.get("x-csrf-token")
     if csrf:
         session.headers.update({"x-csrf-token": csrf})
-        return True
-    return False
 
-def verify_cookie():
-    r = session.get("https://users.roblox.com/v1/users/authenticated", timeout=10)
-    if r.status_code == 200:
-        d = r.json()
-        return d.get("name"), d.get("id")
-    return None, None
-
-def safe_get(url, params=None, retries=5):
-    for attempt in range(retries):
-        try:
-            r = session.get(url, params=params, timeout=15)
-            if r.status_code == 200 and r.text:
-                return r.json()
-            elif r.status_code in (429, 500):
-                wait = (attempt + 1) * 4
-                print(f"  {C.YELLOW}[{r.status_code}] {wait}s bekleniyor...{C.RESET}")
-                time.sleep(wait)
-            else:
-                return None
-        except Exception as e:
-            print(f"  {C.RED}Hata: {e}{C.RESET}")
-            time.sleep(3)
-    return None
-
-def fetch_all_sales():
-    sales        = defaultdict(int)
-    cursor       = None
-    page         = 0
-    oldest_date  = None
-    newest_date  = None
-    total_tx     = 0
-    url          = f"https://economy.roblox.com/v2/groups/{GROUP_ID}/transactions"
-
-    print(f"\n  {C.CYAN}Tüm satış geçmişi taranıyor...{C.RESET}")
-    print(f"  {C.GRAY}(API'nin izin verdiği kadar geriye gidilecek){C.RESET}\n")
-
-    while True:
-        params = {"limit": 100, "transactionType": "Sale"}
-        if cursor:
-            params["cursor"] = cursor
-
-        data = safe_get(url, params)
-        if data is None:
-            print(f"  {C.YELLOW}API yanıt vermedi, duruyoruz.{C.RESET}")
-            break
-        if "errors" in data:
-            print(f"  {C.RED}Hata: {data['errors']}{C.RESET}")
-            break
-
-        rows = data.get("data", [])
-        if not rows:
-            break
-
-        for tx in rows:
-            total_tx += 1
-
-            created = tx.get("created", "")
-            if created:
-                try:
-                    dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
-                    if oldest_date is None or dt < oldest_date:
-                        oldest_date = dt
-                    if newest_date is None or dt > newest_date:
-                        newest_date = dt
-                except Exception:
-                    pass
-
-            buyer_id = None
-            agent = tx.get("agent")
-            if isinstance(agent, dict):
-                buyer_id = agent.get("id")
-            elif isinstance(agent, int):
-                buyer_id = agent
-            if not buyer_id:
-                for field in ("purchaser", "buyer", "user"):
-                    val = tx.get(field)
-                    if isinstance(val, dict):
-                        buyer_id = val.get("id") or val.get("userId")
-                        if buyer_id:
-                            break
-                    elif isinstance(val, int):
-                        buyer_id = val
-                        break
-            if buyer_id:
-                sales[buyer_id] += 1
-
-        page  += 1
-        cursor = data.get("nextPageCursor")
-
-        if page % 5 == 0:
-            oldest_str = oldest_date.strftime("%Y-%m-%d") if oldest_date else "?"
-            print(f"  {C.GRAY}Sayfa {page:>4} | {total_tx:>6} işlem | "
-                  f"{len(sales):>4} alıcı | En eski: {oldest_str}{C.RESET}")
-
-        if not cursor:
-            print(f"\n  {C.GREEN}✓ Tüm geçmiş tarandı — cursor bitti.{C.RESET}")
-            break
-
-        time.sleep(1.2)
-
-    return dict(sales), oldest_date, newest_date, total_tx
-
-def fetch_group_members():
-    members = {}
+    members = []
     cursor  = None
     while True:
         params = {"limit": 100, "sortOrder": "Asc"}
@@ -141,79 +58,144 @@ def fetch_group_members():
         if not data:
             break
         for m in data.get("data", []):
-            uid = m["user"]["userId"]
-            members[uid] = {
+            members.append({
+                "id":       m["user"]["userId"],
                 "username": m["user"]["username"],
                 "role":     m["role"]["name"],
-            }
+            })
         cursor = data.get("nextPageCursor")
         if not cursor:
             break
-        time.sleep(0.5)
+        time.sleep(0.4)
     return members
 
+def rolimons_rap(user_id):
+    data = safe_get(f"https://api.rolimons.com/players/v1/playerinfo/{user_id}")
+    if data and data.get("success"):
+        return data.get("rap", 0) or 0
+    return None
+
+def avatar_rap(user_id):
+    """
+    Avatar API'den giyili itemları çek, her birinin RAP'ini economy'den al.
+    Sadece Rolimons 0/None döndürdüğünde çağrılır — hızlı fallback.
+    """
+    total = 0
+    data  = safe_get(f"https://avatar.roblox.com/v1/users/{user_id}/avatar")
+    if not data:
+        return 0
+
+    asset_ids = [a["id"] for a in data.get("assets", [])]
+    for aid in asset_ids:
+        rap_data = safe_get(f"https://economy.roblox.com/v1/assets/{aid}/resale-data")
+        if rap_data:
+            rap = rap_data.get("recentAveragePrice", 0) or 0
+            total += rap
+        time.sleep(0.05)
+
+    return total
+
+def scan_member(m):
+    uid      = m["id"]
+    username = m["username"]
+
+    rol_rap = rolimons_rap(uid)
+    time.sleep(0.15)
+
+    if rol_rap and rol_rap > 0:
+        return rol_rap, "ROL"
+
+    av_rap = avatar_rap(uid)
+    source = "AVATAR" if av_rap > 0 else "NONE"
+    return av_rap, source
+
 def main():
-    print(f"\n{C.CYAN}{'─'*62}{C.RESET}")
-    print(f"{C.CYAN}{C.BOLD}  Satış Geçmişi Analiz Aracı{C.RESET}")
-    print(f"{C.CYAN}{'─'*62}{C.RESET}")
+    print(f"\n{C.CYAN}{'─'*58}{C.RESET}")
+    print(f"{C.CYAN}{C.BOLD}  Roblox 500K+ RAP Scanner{C.RESET}")
+    print(f"{C.CYAN}  Group   : {GROUP_ID}{C.RESET}")
+    print(f"{C.CYAN}  Eşik    : {fmt(RAP_THRESHOLD)} RAP{C.RESET}")
+    print(f"{C.CYAN}  Kaynak  : Rolimons → Avatar fallback{C.RESET}")
+    print(f"{C.CYAN}{'─'*58}{C.RESET}")
 
-    cookie = getpass.getpass(f"\n  {C.CYAN}.ROBLOSECURITY →{C.RESET} ")
-    if not setup_session(cookie.strip()):
-        print(f"  {C.RED}CSRF token alınamadı.{C.RESET}")
-        return
+    cookie = getpass.getpass(f"\n  {C.CYAN}.ROBLOSECURITY (boş bırakabilirsin) →{C.RESET} ").strip()
 
-    name, _ = verify_cookie()
-    if not name:
-        print(f"  {C.RED}Cookie geçersiz.{C.RESET}")
-        return
-    print(f"  {C.GREEN}✓ Giriş: {name}{C.RESET}")
+    print(f"\n  {C.GRAY}Üyeler çekiliyor...{C.RESET}")
+    members = fetch_group_members(cookie) if cookie else []
 
-    print(f"\n  {C.CYAN}Grup üyeleri çekiliyor...{C.RESET}")
-    members = fetch_group_members()
-    print(f"  {C.GREEN}✓ {len(members)} üye{C.RESET}")
+    if not members:
+        print(f"  {C.YELLOW}Cookie girilmedi veya hata — cookie olmadan devam ediliyor.{C.RESET}")
+        members = []
+        cursor  = None
+        while True:
+            params = {"limit": 100, "sortOrder": "Asc"}
+            if cursor:
+                params["cursor"] = cursor
+            data = safe_get(f"https://groups.roblox.com/v1/groups/{GROUP_ID}/users", params)
+            if not data:
+                break
+            for m in data.get("data", []):
+                members.append({
+                    "id":       m["user"]["userId"],
+                    "username": m["user"]["username"],
+                    "role":     m["role"]["name"],
+                })
+            cursor = data.get("nextPageCursor")
+            if not cursor:
+                break
+            time.sleep(0.4)
 
-    sales, oldest, newest, total_tx = fetch_all_sales()
+    total   = len(members)
+    results = []
+    print(f"  {C.GREEN}✓ {total} üye bulundu{C.RESET}\n")
+    print(f"  {C.GRAY}Taranıyor...{C.RESET}\n")
 
-    print(f"\n{C.CYAN}{'─'*62}{C.RESET}")
-    print(f"{C.CYAN}{C.BOLD}  SONUÇLAR{C.RESET}")
-    print(f"{C.CYAN}{'─'*62}{C.RESET}")
-    print(f"  Toplam işlem  : {C.WHITE}{total_tx}{C.RESET}")
-    print(f"  Toplam alıcı  : {C.WHITE}{len(sales)}{C.RESET}")
-    if oldest:
-        print(f"  En eski tarih : {C.YELLOW}{oldest.strftime('%Y-%m-%d %H:%M')}{C.RESET}")
-    if newest:
-        print(f"  En yeni tarih : {C.YELLOW}{newest.strftime('%Y-%m-%d %H:%M')}{C.RESET}")
-    if oldest and newest:
-        delta = (newest - oldest).days
-        print(f"  Kapsanan süre : {C.YELLOW}{delta} gün{C.RESET}")
+    for i, m in enumerate(members, 1):
+        rap, source = scan_member(m)
 
-    TOPLINE_ROLES = {"Topline", "Elite", "Plus"}
-    print(f"\n{C.YELLOW}{'─'*62}{C.RESET}")
-    print(f"{C.YELLOW}{C.BOLD}  MEVCUT ROL SAHİPLERİNİN SATIŞ ANALİZİ{C.RESET}")
-    print(f"{C.YELLOW}{'─'*62}{C.RESET}")
+        src_color = C.GREEN if source == "ROL" else (C.YELLOW if source == "AVATAR" else C.GRAY)
+        status    = f"{C.GREEN}✓ {fmt(rap)}{C.RESET}" if rap >= RAP_THRESHOLD else f"{C.GRAY}{fmt(rap)}{C.RESET}"
 
-    for uid, m in members.items():
-        if m["role"] not in TOPLINE_ROLES:
-            continue
-        count = sales.get(uid, 0)
-        bar   = "█" * min(count, 25)
-        color = C.MAGENTA if m["role"] == "Topline" else (C.CYAN if m["role"] == "Elite" else C.WHITE)
-        flag  = ""
-        if count == 0:
-            flag = f"  {C.RED}⚠ API'de satış YOK — manuel verilmiş olabilir{C.RESET}"
-        elif count < 10:
-            flag = f"  {C.RED}⚠ eşiğin altında{C.RESET}"
-        print(f"  {color}{m['username']:<24}{C.RESET} "
-              f"{C.YELLOW}{count:>3} satış{C.RESET}  "
-              f"{C.GRAY}{bar:<25}{C.RESET}  "
-              f"[{color}{m['role']}{C.RESET}]{flag}")
+        print(f"  {C.GRAY}[{i:>4}/{total}]{C.RESET} "
+              f"{C.WHITE}{m['username']:<22}{C.RESET} "
+              f"{status:<20}  "
+              f"{src_color}[{source}]{C.RESET}",
+              end="\r" if rap < RAP_THRESHOLD else "\n")
 
-    print(f"\n{C.CYAN}{'─'*62}{C.RESET}")
-    print(f"{C.BOLD}  ÖNEMLİ NOT:{C.RESET}")
-    print(f"  Eğer 'En eski tarih' sadece birkaç hafta önceyse,")
-    print(f"  Roblox API tüm geçmişi vermiyordur.")
-    print(f"  Bu durumda eski rol sahiplerini düşürmemek için")
-    print(f"  {C.GREEN}bot'a 'mevcut rolü koru' seçeneği eklenecek.{C.RESET}")
-    print(f"{C.CYAN}{'─'*62}{C.RESET}\n")
+        if rap >= RAP_THRESHOLD:
+            results.append({
+                "username": m["username"],
+                "role":     m["role"],
+                "rap":      rap,
+                "source":   source,
+            })
+
+        time.sleep(0.2)
+
+    results.sort(key=lambda x: x["rap"], reverse=True)
+
+    print(f"\n\n{C.CYAN}{'─'*58}{C.RESET}")
+    print(f"{C.CYAN}{C.BOLD}  500K+ RAP  —  {len(results)} kişi{C.RESET}")
+    print(f"{C.CYAN}{'─'*58}{C.RESET}\n")
+
+    if results:
+        for u in results:
+            bar       = "█" * min(int(u["rap"] / RAP_THRESHOLD * 4), 20)
+            src_color = C.GREEN if u["source"] == "ROL" else C.YELLOW
+            print(f"  {C.WHITE}{u['username']:<22}{C.RESET} "
+                  f"{C.MAGENTA}{C.BOLD}{fmt(u['rap']):>8} RAP{C.RESET}  "
+                  f"{C.CYAN}{bar:<20}{C.RESET}  "
+                  f"{src_color}[{u['source']}]{C.RESET}  "
+                  f"{C.GRAY}{u['role']}{C.RESET}")
+    else:
+        print(f"  {C.GRAY}500K üstü kimse bulunamadı.{C.RESET}")
+
+    print(f"\n{C.CYAN}{'─'*58}{C.RESET}")
+    print(f"  Taranan  : {C.WHITE}{total}{C.RESET}")
+    print(f"  Bulunan  : {C.GREEN}{len(results)}{C.RESET}")
+    rol_count    = sum(1 for u in results if u["source"] == "ROL")
+    avatar_count = sum(1 for u in results if u["source"] == "AVATAR")
+    print(f"  Rolimons : {C.GREEN}{rol_count}{C.RESET}  |  "
+          f"Avatar fallback: {C.YELLOW}{avatar_count}{C.RESET}")
+    print(f"{C.CYAN}{'─'*58}{C.RESET}\n")
 
 main()
