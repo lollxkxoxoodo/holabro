@@ -1,201 +1,202 @@
 import requests
-import time
-import getpass
+import re
+import sys
+from collections import defaultdict
+from getpass import getpass
 
-GROUP_ID      = 827675604
-RAP_THRESHOLD = 500_000
+# ─────────────────────────────────────────
+#  Roblox Group Payout Analyzer
+#  Kullanım: python roblox_payout_analyzer.py
+# ─────────────────────────────────────────
 
-class C:
-    RESET   = "\033[0m"
-    BOLD    = "\033[1m"
-    DIM     = "\033[2m"
-    RED     = "\033[91m"
-    GREEN   = "\033[92m"
-    YELLOW  = "\033[93m"
-    CYAN    = "\033[96m"
-    MAGENTA = "\033[95m"
-    WHITE   = "\033[97m"
-    GRAY    = "\033[90m"
+GROUP_ID = 827675604
 
-def fmt(v):
-    if v >= 1_000_000:
-        return f"{v/1_000_000:.1f}M"
-    elif v >= 1_000:
-        return f"{v/1_000:.1f}K"
-    return str(v)
+HEADERS_BASE = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+}
 
-session = requests.Session()
-session.headers.update({"User-Agent": "Mozilla/5.0"})
-
-def safe_get(url, params=None, retries=4):
-    for attempt in range(retries):
-        try:
-            r = session.get(url, params=params, timeout=10)
-            if r.status_code == 200 and r.text:
-                return r.json()
-            elif r.status_code == 429:
-                time.sleep((attempt + 1) * 3)
-            else:
-                return None
-        except Exception:
-            time.sleep(2)
-    return None
-
-def fetch_group_members(cookie):
+def get_session(cookie: str) -> requests.Session:
+    session = requests.Session()
     session.cookies.set(".ROBLOSECURITY", cookie, domain=".roblox.com")
-    r = session.post("https://auth.roblox.com/v2/logout", timeout=10)
+    # CSRF token al
+    r = session.post("https://auth.roblox.com/v2/logout")
     csrf = r.headers.get("x-csrf-token")
     if csrf:
         session.headers.update({"x-csrf-token": csrf})
+    session.headers.update(HEADERS_BASE)
+    return session
 
-    members = []
-    cursor  = None
+def verify_login(session: requests.Session) -> dict | None:
+    r = session.get("https://users.roblox.com/v1/users/authenticated")
+    if r.status_code == 200:
+        return r.json()
+    return None
+
+def fetch_audit_logs(session: requests.Session, group_id: int) -> list[dict]:
+    """Grubun tüm audit loglarını sayfalayarak çeker."""
+    logs = []
+    cursor = ""
+    page = 1
+
+    print("\n📥 Audit loglar çekiliyor...")
+
     while True:
-        params = {"limit": 100, "sortOrder": "Asc"}
+        url = (
+            f"https://groups.roblox.com/v1/groups/{group_id}/audit-log"
+            f"?actionType=SpendGroupFunds&limit=100"
+        )
         if cursor:
-            params["cursor"] = cursor
-        data = safe_get(f"https://groups.roblox.com/v1/groups/{GROUP_ID}/users", params)
-        if not data:
+            url += f"&cursor={cursor}"
+
+        r = session.get(url)
+
+        if r.status_code == 403:
+            print("❌ Erişim reddedildi. Hesabın bu grubun owner/admin'i değil olabilir.")
             break
-        for m in data.get("data", []):
-            members.append({
-                "id":       m["user"]["userId"],
-                "username": m["user"]["username"],
-                "role":     m["role"]["name"],
-            })
+        if r.status_code != 200:
+            print(f"❌ API hatası: {r.status_code} - {r.text}")
+            break
+
+        data = r.json()
+        items = data.get("data", [])
+        logs.extend(items)
+        print(f"   Sayfa {page}: {len(items)} kayıt alındı (toplam: {len(logs)})")
+
         cursor = data.get("nextPageCursor")
         if not cursor:
             break
-        time.sleep(0.4)
-    return members
+        page += 1
 
-def rolimons_rap(user_id):
-    data = safe_get(f"https://api.rolimons.com/players/v1/playerinfo/{user_id}")
-    if data and data.get("success"):
-        return data.get("rap", 0) or 0
-    return None
+    return logs
 
-def avatar_rap(user_id):
+def parse_payout_amount(description: str) -> int:
     """
-    Avatar API'den giyili itemları çek, her birinin RAP'ini economy'den al.
-    Sadece Rolimons 0/None döndürdüğünde çağrılır — hızlı fallback.
+    Açıklama stringinden Robux miktarını çıkarır.
+    Örnek: "...one-time payout of Robux from group funds to UserName (50)"
     """
-    total = 0
-    data  = safe_get(f"https://avatar.roblox.com/v1/users/{user_id}/avatar")
-    if not data:
-        return 0
+    match = re.search(r'\((\d+)\)\s*$', description)
+    if match:
+        return int(match.group(1))
+    # Alternatif format
+    match2 = re.search(r'spent (\d+)', description)
+    if match2:
+        return int(match2.group(1))
+    return 0
 
-    asset_ids = [a["id"] for a in data.get("assets", [])]
-    for aid in asset_ids:
-        rap_data = safe_get(f"https://economy.roblox.com/v1/assets/{aid}/resale-data")
-        if rap_data:
-            rap = rap_data.get("recentAveragePrice", 0) or 0
-            total += rap
-        time.sleep(0.05)
+def analyze_logs(logs: list[dict]) -> dict[str, int]:
+    """Her kullanıcının toplam aldığı Robux'u hesaplar."""
+    totals = defaultdict(int)
 
-    return total
+    for entry in logs:
+        actor = entry.get("actor", {})
+        description = entry.get("description", "")
 
-def scan_member(m):
-    uid      = m["id"]
-    username = m["username"]
+        # Payout alan kişiyi bul (actor değil, açıklamadan)
+        # Format: "X spent Y of group funds for: one-time payout of Robux from group funds to Z (Y)"
+        recipient_match = re.search(r'payout of Robux from group funds to ([^\(]+)\s*\((\d+)\)', description)
+        if recipient_match:
+            recipient = recipient_match.group(1).strip()
+            amount = int(recipient_match.group(2))
+            totals[recipient] += amount
+        else:
+            # Fallback: actor yaptıysa
+            actor_name = actor.get("user", {}).get("username", "Bilinmeyen")
+            amount = parse_payout_amount(description)
+            if amount > 0:
+                totals[actor_name] += amount
 
-    rol_rap = rolimons_rap(uid)
-    time.sleep(0.15)
+    return dict(totals)
 
-    if rol_rap and rol_rap > 0:
-        return rol_rap, "ROL"
+def print_report(totals: dict[str, int]):
+    if not totals:
+        print("\n⚠️  Hiç payout kaydı bulunamadı.")
+        return
 
-    av_rap = avatar_rap(uid)
-    source = "AVATAR" if av_rap > 0 else "NONE"
-    return av_rap, source
+    print("\n" + "═" * 50)
+    print("        💰 PAYOUT ANALİZ RAPORU")
+    print("═" * 50)
+    print(f"  Grup ID: {GROUP_ID}")
+    print("─" * 50)
+    print(f"  {'Kullanıcı Adı':<30} {'Toplam Robux':>12}")
+    print("─" * 50)
+
+    sorted_totals = sorted(totals.items(), key=lambda x: x[1], reverse=True)
+    grand_total = 0
+
+    for username, amount in sorted_totals:
+        print(f"  {username:<30} {amount:>12,} R$")
+        grand_total += amount
+
+    print("─" * 50)
+    print(f"  {'TOPLAM':<30} {grand_total:>12,} R$")
+    print("═" * 50)
+    print(f"\n  Toplam {len(totals)} farklı kişiye ödeme yapılmış.")
+
+def save_report(totals: dict[str, int]):
+    filename = "payout_raporu.txt"
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(f"Grup ID: {GROUP_ID}\n")
+            f.write("=" * 50 + "\n")
+            f.write(f"{'Kullanıcı Adı':<30} {'Toplam Robux':>12}\n")
+            f.write("-" * 50 + "\n")
+            sorted_totals = sorted(totals.items(), key=lambda x: x[1], reverse=True)
+            grand_total = 0
+            for username, amount in sorted_totals:
+                f.write(f"{username:<30} {amount:>12,} R$\n")
+                grand_total += amount
+            f.write("-" * 50 + "\n")
+            f.write(f"{'TOPLAM':<30} {grand_total:>12,} R$\n")
+        print(f"\n💾 Rapor '{filename}' dosyasına kaydedildi.")
+    except Exception as e:
+        print(f"⚠️  Dosya kaydedilemedi: {e}")
 
 def main():
-    print(f"\n{C.CYAN}{'─'*58}{C.RESET}")
-    print(f"{C.CYAN}{C.BOLD}  Roblox 500K+ RAP Scanner{C.RESET}")
-    print(f"{C.CYAN}  Group   : {GROUP_ID}{C.RESET}")
-    print(f"{C.CYAN}  Eşik    : {fmt(RAP_THRESHOLD)} RAP{C.RESET}")
-    print(f"{C.CYAN}  Kaynak  : Rolimons → Avatar fallback{C.RESET}")
-    print(f"{C.CYAN}{'─'*58}{C.RESET}")
+    print("╔══════════════════════════════════════╗")
+    print("║   Roblox Group Payout Analyzer       ║")
+    print("║   Grup ID: 827675604                 ║")
+    print("╚══════════════════════════════════════╝\n")
 
-    cookie = getpass.getpass(f"\n  {C.CYAN}.ROBLOSECURITY (boş bırakabilirsin) →{C.RESET} ").strip()
+    print("🔐 .ROBLOSECURITY cookie'nizi girin:")
+    print("   (Roblox.com > F12 > Application > Cookies > .ROBLOSECURITY)\n")
+    cookie = getpass("Cookie: ").strip()
 
-    print(f"\n  {C.GRAY}Üyeler çekiliyor...{C.RESET}")
-    members = fetch_group_members(cookie) if cookie else []
+    if not cookie:
+        print("❌ Cookie boş olamaz.")
+        sys.exit(1)
 
-    if not members:
-        print(f"  {C.YELLOW}Cookie girilmedi veya hata — cookie olmadan devam ediliyor.{C.RESET}")
-        members = []
-        cursor  = None
-        while True:
-            params = {"limit": 100, "sortOrder": "Asc"}
-            if cursor:
-                params["cursor"] = cursor
-            data = safe_get(f"https://groups.roblox.com/v1/groups/{GROUP_ID}/users", params)
-            if not data:
-                break
-            for m in data.get("data", []):
-                members.append({
-                    "id":       m["user"]["userId"],
-                    "username": m["user"]["username"],
-                    "role":     m["role"]["name"],
-                })
-            cursor = data.get("nextPageCursor")
-            if not cursor:
-                break
-            time.sleep(0.4)
+    # Cookie başında _|WARNING: varsa temizle
+    if cookie.startswith("_|WARNING"):
+        # Tüm cookie değeri olduğu gibi kullan (Roblox formatı)
+        pass
 
-    total   = len(members)
-    results = []
-    print(f"  {C.GREEN}✓ {total} üye bulundu{C.RESET}\n")
-    print(f"  {C.GRAY}Taranıyor...{C.RESET}\n")
+    print("\n🔄 Giriş yapılıyor...")
+    session = get_session(cookie)
+    user = verify_login(session)
 
-    for i, m in enumerate(members, 1):
-        rap, source = scan_member(m)
+    if not user:
+        print("❌ Giriş başarısız. Cookie geçersiz veya süresi dolmuş.")
+        sys.exit(1)
 
-        src_color = C.GREEN if source == "ROL" else (C.YELLOW if source == "AVATAR" else C.GRAY)
-        status    = f"{C.GREEN}✓ {fmt(rap)}{C.RESET}" if rap >= RAP_THRESHOLD else f"{C.GRAY}{fmt(rap)}{C.RESET}"
+    print(f"✅ Giriş başarılı! Hoş geldin, {user.get('name', '?')} (ID: {user.get('id', '?')})")
 
-        print(f"  {C.GRAY}[{i:>4}/{total}]{C.RESET} "
-              f"{C.WHITE}{m['username']:<22}{C.RESET} "
-              f"{status:<20}  "
-              f"{src_color}[{source}]{C.RESET}",
-              end="\r" if rap < RAP_THRESHOLD else "\n")
+    logs = fetch_audit_logs(session, GROUP_ID)
 
-        if rap >= RAP_THRESHOLD:
-            results.append({
-                "username": m["username"],
-                "role":     m["role"],
-                "rap":      rap,
-                "source":   source,
-            })
+    if not logs:
+        print("\n⚠️  Log bulunamadı veya erişim yok.")
+        sys.exit(1)
 
-        time.sleep(0.2)
+    print(f"\n✅ Toplam {len(logs)} payout kaydı bulundu. Analiz ediliyor...")
+    totals = analyze_logs(logs)
+    print_report(totals)
 
-    results.sort(key=lambda x: x["rap"], reverse=True)
+    save_q = input("\n📄 Raporu .txt dosyasına kaydetmek ister misin? (e/h): ").strip().lower()
+    if save_q == "e":
+        save_report(totals)
 
-    print(f"\n\n{C.CYAN}{'─'*58}{C.RESET}")
-    print(f"{C.CYAN}{C.BOLD}  500K+ RAP  —  {len(results)} kişi{C.RESET}")
-    print(f"{C.CYAN}{'─'*58}{C.RESET}\n")
+    print("\n✅ İşlem tamamlandı.")
 
-    if results:
-        for u in results:
-            bar       = "█" * min(int(u["rap"] / RAP_THRESHOLD * 4), 20)
-            src_color = C.GREEN if u["source"] == "ROL" else C.YELLOW
-            print(f"  {C.WHITE}{u['username']:<22}{C.RESET} "
-                  f"{C.MAGENTA}{C.BOLD}{fmt(u['rap']):>8} RAP{C.RESET}  "
-                  f"{C.CYAN}{bar:<20}{C.RESET}  "
-                  f"{src_color}[{u['source']}]{C.RESET}  "
-                  f"{C.GRAY}{u['role']}{C.RESET}")
-    else:
-        print(f"  {C.GRAY}500K üstü kimse bulunamadı.{C.RESET}")
-
-    print(f"\n{C.CYAN}{'─'*58}{C.RESET}")
-    print(f"  Taranan  : {C.WHITE}{total}{C.RESET}")
-    print(f"  Bulunan  : {C.GREEN}{len(results)}{C.RESET}")
-    rol_count    = sum(1 for u in results if u["source"] == "ROL")
-    avatar_count = sum(1 for u in results if u["source"] == "AVATAR")
-    print(f"  Rolimons : {C.GREEN}{rol_count}{C.RESET}  |  "
-          f"Avatar fallback: {C.YELLOW}{avatar_count}{C.RESET}")
-    print(f"{C.CYAN}{'─'*58}{C.RESET}\n")
-
-main()
+if __name__ == "__main__":
+    main()
