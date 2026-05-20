@@ -1,6 +1,7 @@
 import requests
 import re
 import sys
+import json
 from collections import defaultdict
 from getpass import getpass
 
@@ -20,7 +21,6 @@ HEADERS_BASE = {
 def get_session(cookie: str) -> requests.Session:
     session = requests.Session()
     session.cookies.set(".ROBLOSECURITY", cookie, domain=".roblox.com")
-    # CSRF token al
     r = session.post("https://auth.roblox.com/v2/logout")
     csrf = r.headers.get("x-csrf-token")
     if csrf:
@@ -28,14 +28,13 @@ def get_session(cookie: str) -> requests.Session:
     session.headers.update(HEADERS_BASE)
     return session
 
-def verify_login(session: requests.Session) -> dict | None:
+def verify_login(session: requests.Session):
     r = session.get("https://users.roblox.com/v1/users/authenticated")
     if r.status_code == 200:
         return r.json()
     return None
 
-def fetch_audit_logs(session: requests.Session, group_id: int) -> list[dict]:
-    """Grubun tüm audit loglarını sayfalayarak çeker."""
+def fetch_audit_logs(session: requests.Session, group_id: int) -> list:
     logs = []
     cursor = ""
     page = 1
@@ -71,93 +70,145 @@ def fetch_audit_logs(session: requests.Session, group_id: int) -> list[dict]:
 
     return logs
 
-def parse_payout_amount(description: str) -> int:
-    """
-    Açıklama stringinden Robux miktarını çıkarır.
-    Örnek: "...one-time payout of Robux from group funds to UserName (50)"
-    """
-    match = re.search(r'\((\d+)\)\s*$', description)
-    if match:
-        return int(match.group(1))
-    # Alternatif format
-    match2 = re.search(r'spent (\d+)', description)
-    if match2:
-        return int(match2.group(1))
-    return 0
+def extract_text(description) -> str:
+    """description string veya dict olabilir, her ikisini de handle eder."""
+    if isinstance(description, str):
+        return description
+    if isinstance(description, dict):
+        # Roblox bazen {"recipient": "...", "amount": 50} gibi dict döner
+        # Tüm değerleri string olarak birleştir
+        parts = []
+        for v in description.values():
+            parts.append(str(v))
+        return " ".join(parts)
+    return str(description)
 
-def analyze_logs(logs: list[dict]) -> dict[str, int]:
-    """Her kullanıcının toplam aldığı Robux'u hesaplar."""
+def parse_from_dict(description: dict):
+    """
+    Roblox API dict formatından direkt recipient ve amount çeker.
+    Olası anahtarlar: recipient, amount, robux, username, displayName
+    """
+    recipient = None
+    amount = 0
+
+    # Recipient için olası anahtarlar
+    for key in ["recipient", "username", "displayName", "name", "targetUser"]:
+        if key in description:
+            recipient = str(description[key])
+            break
+
+    # Amount için olası anahtarlar
+    for key in ["amount", "robux", "robuxAmount", "value"]:
+        if key in description:
+            try:
+                amount = int(description[key])
+            except (ValueError, TypeError):
+                pass
+            break
+
+    return recipient, amount
+
+def analyze_logs(logs: list) -> dict:
     totals = defaultdict(int)
+    unmatched = 0
 
     for entry in logs:
-        actor = entry.get("actor", {})
         description = entry.get("description", "")
+        actor = entry.get("actor", {})
+        actor_name = actor.get("user", {}).get("username", "Bilinmeyen")
 
-        # Payout alan kişiyi bul (actor değil, açıklamadan)
-        # Format: "X spent Y of group funds for: one-time payout of Robux from group funds to Z (Y)"
-        recipient_match = re.search(r'payout of Robux from group funds to ([^\(]+)\s*\((\d+)\)', description)
-        if recipient_match:
-            recipient = recipient_match.group(1).strip()
-            amount = int(recipient_match.group(2))
-            totals[recipient] += amount
+        # ── Dict formatı ──
+        if isinstance(description, dict):
+            recipient, amount = parse_from_dict(description)
+            if recipient and amount > 0:
+                totals[recipient] += amount
+                continue
+            # Dict'ten çekemedik, string'e çevir ve regex dene
+            description_str = extract_text(description)
         else:
-            # Fallback: actor yaptıysa
-            actor_name = actor.get("user", {}).get("username", "Bilinmeyen")
-            amount = parse_payout_amount(description)
-            if amount > 0:
-                totals[actor_name] += amount
+            description_str = description
+
+        # ── String / Regex formatı ──
+        # Format 1: "payout of Robux from group funds to UserName (50)"
+        m = re.search(r'payout of Robux from group funds to ([^\(]+)\s*\((\d+)\)', description_str)
+        if m:
+            totals[m.group(1).strip()] += int(m.group(2))
+            continue
+
+        # Format 2: "UserName spent 50 of group funds"
+        m2 = re.search(r'(\w+) spent (\d+) of group funds', description_str)
+        if m2:
+            totals[m2.group(1).strip()] += int(m2.group(2))
+            continue
+
+        # Format 3: Sadece sayı varsa actor'a yaz
+        m3 = re.search(r'\b(\d+)\b', description_str)
+        if m3:
+            totals[actor_name] += int(m3.group(1))
+            continue
+
+        unmatched += 1
+
+    if unmatched > 0:
+        print(f"⚠️  {unmatched} kayıt hiçbir formata uymadı, atlandı.")
 
     return dict(totals)
 
-def print_report(totals: dict[str, int]):
+def print_report(totals: dict):
     if not totals:
         print("\n⚠️  Hiç payout kaydı bulunamadı.")
         return
 
-    print("\n" + "═" * 50)
-    print("        💰 PAYOUT ANALİZ RAPORU")
-    print("═" * 50)
-    print(f"  Grup ID: {GROUP_ID}")
-    print("─" * 50)
-    print(f"  {'Kullanıcı Adı':<30} {'Toplam Robux':>12}")
-    print("─" * 50)
+    print("\n" + "═" * 52)
+    print("          💰 PAYOUT ANALİZ RAPORU")
+    print("═" * 52)
+    print(f"  Grup ID : {GROUP_ID}")
+    print("─" * 52)
+    print(f"  {'Kullanıcı Adı':<32} {'Toplam Robux':>12}")
+    print("─" * 52)
 
     sorted_totals = sorted(totals.items(), key=lambda x: x[1], reverse=True)
     grand_total = 0
 
     for username, amount in sorted_totals:
-        print(f"  {username:<30} {amount:>12,} R$")
+        print(f"  {username:<32} {amount:>10,} R$")
         grand_total += amount
 
-    print("─" * 50)
-    print(f"  {'TOPLAM':<30} {grand_total:>12,} R$")
-    print("═" * 50)
+    print("─" * 52)
+    print(f"  {'TOPLAM':<32} {grand_total:>10,} R$")
+    print("═" * 52)
     print(f"\n  Toplam {len(totals)} farklı kişiye ödeme yapılmış.")
 
-def save_report(totals: dict[str, int]):
+def save_report(totals: dict):
     filename = "payout_raporu.txt"
     try:
         with open(filename, "w", encoding="utf-8") as f:
             f.write(f"Grup ID: {GROUP_ID}\n")
-            f.write("=" * 50 + "\n")
-            f.write(f"{'Kullanıcı Adı':<30} {'Toplam Robux':>12}\n")
-            f.write("-" * 50 + "\n")
+            f.write("=" * 52 + "\n")
+            f.write(f"{'Kullanıcı Adı':<32} {'Toplam Robux':>12}\n")
+            f.write("-" * 52 + "\n")
             sorted_totals = sorted(totals.items(), key=lambda x: x[1], reverse=True)
             grand_total = 0
             for username, amount in sorted_totals:
-                f.write(f"{username:<30} {amount:>12,} R$\n")
+                f.write(f"{username:<32} {amount:>10,} R$\n")
                 grand_total += amount
-            f.write("-" * 50 + "\n")
-            f.write(f"{'TOPLAM':<30} {grand_total:>12,} R$\n")
+            f.write("-" * 52 + "\n")
+            f.write(f"{'TOPLAM':<32} {grand_total:>10,} R$\n")
         print(f"\n💾 Rapor '{filename}' dosyasına kaydedildi.")
     except Exception as e:
         print(f"⚠️  Dosya kaydedilemedi: {e}")
 
+def debug_first_log(logs: list):
+    """İlk kaydın ham halini gösterir — format anlamak için."""
+    if logs:
+        print("\n🔍 İlk log kaydı (ham format):")
+        print(json.dumps(logs[0], indent=2, ensure_ascii=False))
+
 def main():
-    print("╔══════════════════════════════════════╗")
-    print("║   Roblox Group Payout Analyzer       ║")
-    print("║   Grup ID: 827675604                 ║")
-    print("╚══════════════════════════════════════╝\n")
+    print("╔════════════════════════════════════════════╗")
+    print("║     Roblox Group Payout Analyzer           ║")
+    print("║     Grup ID: 827675604                     ║")
+    print("╚════════════════════════════════════════════╝\n")
 
     print("🔐 .ROBLOSECURITY cookie'nizi girin:")
     print("   (Roblox.com > F12 > Application > Cookies > .ROBLOSECURITY)\n")
@@ -166,11 +217,6 @@ def main():
     if not cookie:
         print("❌ Cookie boş olamaz.")
         sys.exit(1)
-
-    # Cookie başında _|WARNING: varsa temizle
-    if cookie.startswith("_|WARNING"):
-        # Tüm cookie değeri olduğu gibi kullan (Roblox formatı)
-        pass
 
     print("\n🔄 Giriş yapılıyor...")
     session = get_session(cookie)
@@ -189,6 +235,10 @@ def main():
         sys.exit(1)
 
     print(f"\n✅ Toplam {len(logs)} payout kaydı bulundu. Analiz ediliyor...")
+
+    # İlk kaydı debug olarak göster
+    debug_first_log(logs)
+
     totals = analyze_logs(logs)
     print_report(totals)
 
