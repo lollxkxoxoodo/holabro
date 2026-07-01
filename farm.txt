@@ -1,0 +1,496 @@
+getgenv().AutofarmConfig = {
+	Winner = "sducyglsqslvhiy", -- Kazanan hesabın adı
+	Loser = "DorothyHodgkin",   -- Kaybeden hesabın adı
+	SelectedGun = "Revolver", -- "Revolver" veya "DoubleBarrel"
+	MaxWinstreak = 1000,
+	CustomStaff = {
+		"StaffUsername1",
+		12345678
+	},
+	AlertEveryoneOnStaffJoin = false
+}
+
+-- Konfigürasyon Tanımlamaları
+local config = getgenv().AutofarmConfig
+local winner = config.Winner
+local loser = config.Loser
+local selectedGun = config.SelectedGun
+local maxWinstreak = config.MaxWinstreak
+local CustomStaff = config.CustomStaff
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local VirtualUser = game:GetService("VirtualUser")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CoreGui = game:GetService("CoreGui")
+
+local lp = Players.LocalPlayer
+getgenv().LocalPlayer = lp
+
+local char, hum, root
+local Staff = 34199407
+local running = true
+local inBox = false
+local padded = false
+local paused = false
+local activeFp = nil
+local cons = {}
+
+-- Performans için Klasör Önbelleğe Alma (Caching)
+local workspaceIgnored = workspace:WaitForChild("Ignored", 5)
+local workspaceBoxes = workspaceIgnored and workspaceIgnored:WaitForChild("Boxes", 5)
+local workspacePlayersFolder = workspace:WaitForChild("Players", 5)
+
+getgenv().MainEvent = getgenv().MainEvent or ReplicatedStorage:WaitForChild("MainEvent")
+
+getgenv().ForceHit = getgenv().ForceHit or {
+	DeathCheck = true,
+	ForceFieldCheck = true,
+	PrefireForceField = false,
+	WallCheck = false,
+	MaxDistance = 9000,
+	HitPart = "HumanoidRootPart"
+}
+
+-- UI OLUŞTURMA (Minimalist, Endüstriyel ve Yarı Saydam)
+local uiParent = CoreGui:FindFirstChild("RobloxGui") or lp:WaitForChild("PlayerGui")
+if uiParent:FindFirstChild("MobileAutofarmUI") then
+	uiParent["MobileAutofarmUI"]:Destroy()
+end
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "MobileAutofarmUI"
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent = uiParent
+
+local mainFrame = Instance.new("Frame")
+mainFrame.Name = "MainFrame"
+mainFrame.Size = UDim2.new(0, 170, 0, 75)
+mainFrame.Position = UDim2.new(0.5, -85, 0.2, 0)
+mainFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+mainFrame.BackgroundTransparency = 0.35
+mainFrame.BorderSizePixel = 0
+mainFrame.Active = true
+mainFrame.Draggable = true -- Mobil dokunmatik sürükleme desteği
+mainFrame.Parent = screenGui
+
+local uiCorner = Instance.new("UICorner")
+uiCorner.CornerRadius = UDim.new(0, 6)
+uiCorner.Parent = mainFrame
+
+local uiStroke = Instance.new("UIStroke")
+uiStroke.Color = Color3.fromRGB(55, 55, 55)
+uiStroke.Thickness = 1
+uiStroke.Parent = mainFrame
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Name = "StatusLabel"
+statusLabel.Size = UDim2.new(1, 0, 0, 30)
+statusLabel.Position = UDim2.new(0, 0, 0, 5)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Font = Enum.Font.SourceSansBold
+statusLabel.Text = "DURUM: BAŞLATILIYOR"
+statusLabel.TextColor3 = Color3.fromRGB(240, 240, 240)
+statusLabel.TextSize = 13
+statusLabel.Parent = mainFrame
+
+local toggleButton = Instance.new("TextButton")
+toggleButton.Name = "ToggleButton"
+toggleButton.Size = UDim2.new(0.9, 0, 0, 28)
+toggleButton.Position = UDim2.new(0.05, 0, 0, 40)
+toggleButton.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+toggleButton.BackgroundTransparency = 0.2
+toggleButton.Font = Enum.Font.SourceSansBold
+toggleButton.Text = "FARMI DURDUR"
+toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleButton.TextSize = 12
+toggleButton.Parent = mainFrame
+
+local btnCorner = Instance.new("UICorner")
+btnCorner.CornerRadius = UDim.new(0, 4)
+btnCorner.Parent = toggleButton
+
+local function updateStatus(text)
+	statusLabel.Text = "DURUM: " .. string.upper(text)
+end
+
+-- Otomatik Ateş Fonksiyonu
+getgenv().FH_Fire = function(targetPlayer)
+	if not targetPlayer or not targetPlayer.Character then return end
+	local character = targetPlayer.Character
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if getgenv().ForceHit.DeathCheck then
+		if not humanoid or humanoid.Health <= 0 then return end
+		local be = character:FindFirstChild("BodyEffects")
+		if be and be:FindFirstChild("K.O") and be["K.O"].Value then return end
+	end
+	local targetPart = character:FindFirstChild(getgenv().ForceHit.HitPart)
+	if not targetPart then return end
+	if getgenv().ForceHit.ForceFieldCheck then
+		if character:FindFirstChildOfClass("ForceField") then return end
+	end
+	local rootPart = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+	if not rootPart then return end
+	local playerPos = rootPart.Position
+	if (playerPos - targetPart.Position).Magnitude > getgenv().ForceHit.MaxDistance then return end
+	
+	local args = {
+		[1] = "Shoot",
+		[2] = {
+			[1] = {
+				[1] = {Normal=targetPart.Position,Instance=targetPart,Position=targetPart.Position},
+				[2] = {Normal=targetPart.Position,Instance=targetPart,Position=targetPart.Position},
+				[3] = {Normal=targetPart.Position,Instance=targetPart,Position=targetPart.Position},
+				[4] = {Normal=targetPart.Position,Instance=targetPart,Position=targetPart.Position},
+				[5] = {Normal=targetPart.Position,Instance=targetPart,Position=targetPart.Position},
+			},
+			[2] = {
+				[1] = {thePart=targetPart,theOffset=Vector3.new(0,0,0)},
+				[2] = {thePart=targetPart,theOffset=Vector3.new(0,0,0)},
+				[3] = {thePart=targetPart,theOffset=Vector3.new(0,0,0)},
+				[4] = {thePart=targetPart,theOffset=Vector3.new(0,0,0)},
+				[5] = {thePart=targetPart,theOffset=Vector3.new(0,0,0)},
+			},
+			[3] = playerPos,
+			[4] = playerPos,
+			[5] = workspace:GetServerTimeNow()
+		}
+	}
+	pcall(function() getgenv().MainEvent:FireServer(unpack(args)) end)
+end
+
+local function registerConnection(cn)
+	table.insert(cons, cn)
+	return cn
+end
+
+-- Mobil Uyumlu Anti-AFK
+local idledCn = lp.Idled:Connect(function()
+	VirtualUser:CaptureController()
+	VirtualUser:ClickButton2(Vector2.new(0,0))
+end)
+registerConnection(idledCn)
+
+local function getChar()
+	char = lp.Character or lp.CharacterAdded:Wait()
+	hum  = char:WaitForChild("Humanoid")
+	root = char:WaitForChild("HumanoidRootPart")
+end
+getChar()
+
+local charAddedCn = lp.CharacterAdded:Connect(function() 
+	task.wait(0.5) 
+	getChar() 
+end)
+registerConnection(charAddedCn)
+
+local function tp(cf)
+	if root then root.CFrame = cf end
+end
+
+local function getPads(fp)
+	local j1 = fp:FindFirstChild("JoinFight1")
+	local j2 = fp:FindFirstChild("JoinFight2")
+	if not j1 or not j2 then return nil, nil end
+	return j1:FindFirstChild("Region"), j2:FindFirstChild("Region")
+end
+
+local function isPadAreaClear(fp)
+	if not fp then return false end
+	local r1, r2 = getPads(fp)
+	if not r1 or not r2 then return false end
+
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p.Name ~= winner and p.Name ~= loser then
+			local pChar = p.Character
+			local pRoot = pChar and pChar:FindFirstChild("HumanoidRootPart")
+			if pRoot then
+				if (pRoot.Position - r1.Position).Magnitude < 15 or (pRoot.Position - r2.Position).Magnitude < 15 then
+					return false
+				end
+			end
+		end
+	end
+	return true
+end
+
+local function findEmptyFightPlace()
+	if not workspaceBoxes then return nil end
+	for _, fp in ipairs(workspaceBoxes:GetChildren()) do
+		if fp.Name ~= "FightPlace" then continue end
+		if activeFp and fp == activeFp then continue end
+
+		local p1 = fp:FindFirstChild("Player1")
+		local p2 = fp:FindFirstChild("Player2")
+		if p1 and p2 and (p1.Value == "" or p1.Value == nil) and (p2.Value == "" or p2.Value == nil) then
+			if isPadAreaClear(fp) then return fp end
+		end
+	end
+	return nil
+end
+
+local function bothInCharacters()
+	if not workspacePlayersFolder then return false end
+	local chars = workspacePlayersFolder:FindFirstChild("Characters")
+	if not chars then return false end
+	return chars:FindFirstChild(winner) ~= nil and chars:FindFirstChild(loser) ~= nil
+end
+
+local function inBoxCheck()
+	if not workspacePlayersFolder then return false end
+	local ib = workspacePlayersFolder:FindFirstChild("InBox")
+	if not ib then return false end
+	return ib:FindFirstChild(lp.Name) ~= nil
+end
+
+local function getGunName()
+	return selectedGun == "Revolver" and "[Revolver]" or "[DoubleBarrel]"
+end
+
+local function grabGun()
+	local gunName = getGunName()
+	local bp = lp:FindFirstChild("Backpack")
+	if bp then
+		local g = bp:FindFirstChild(gunName)
+		if g then hum:EquipTool(g) return true end
+	end
+	return char:FindFirstChild(gunName) ~= nil
+end
+
+local function createPlatform(pos)
+	local p = workspace:FindFirstChild("_skyPlate")
+	if not p then
+		p = Instance.new("Part")
+		p.Name = "_skyPlate"
+		p.Size = Vector3.new(15, 1, 15)
+		p.Position = pos - Vector3.new(0, 3.5, 0)
+		p.Anchored = true
+		p.CanCollide = true
+		p.Transparency = 0.6
+		p.Material = Enum.Material.SmoothPlastic
+		p.Parent = workspace
+	end
+	return p
+end
+
+local amWinner = lp.Name == winner
+local amLoser  = lp.Name == loser
+
+local function isStaff(player)
+	for _, val in ipairs(CustomStaff) do
+		if typeof(val) == "string" and player.Name:lower() == val:lower() then return true
+		elseif typeof(val) == "number" and player.UserId == val then return true end
+	end
+	local ok, result = pcall(function() return player:IsInGroup(Staff) end)
+	return ok and result
+end
+
+local function stopFarm()
+	paused = true
+	inBox = false
+	padded = false
+	updateStatus("YETKİLİ GİRDİ / DURDURULDU")
+end
+
+local function resumeFarm()
+	paused = false
+	padded = false
+	updateStatus("AKTİF")
+end
+
+-- Yetkili Kontrolleri
+for _, p in ipairs(Players:GetPlayers()) do
+	if p ~= lp and isStaff(p) then stopFarm() end
+end
+
+registerConnection(Players.PlayerAdded:Connect(function(p)
+	if isStaff(p) then stopFarm() end
+end))
+
+registerConnection(Players.PlayerRemoving:Connect(function(p)
+	if isStaff(p) then
+		task.wait(0.5)
+		local stillHasStaff = false
+		for _, pl in ipairs(Players:GetPlayers()) do
+			if pl ~= lp and isStaff(pl) then stillHasStaff = true; break end
+		end
+		if not stillHasStaff and running then resumeFarm() end
+	end
+end))
+
+local function findWinnerPad()
+	local wp = Players:FindFirstChild(winner)
+	if not wp or not wp.Character then return nil end
+	local wr = wp.Character:FindFirstChild("HumanoidRootPart")
+	if not wr or not workspaceBoxes then return nil end
+	
+	for _, fp in ipairs(workspaceBoxes:GetChildren()) do
+		if fp.Name ~= "FightPlace" then continue end
+		local j1 = fp:FindFirstChild("JoinFight1")
+		local r1 = j1 and j1:FindFirstChild("Region")
+		if r1 and (wr.Position - r1.Position).Magnitude < 20 then return fp end
+	end
+	return nil
+end
+
+local function startPadLoop()
+	if padded then return end
+	padded = true
+	task.spawn(function()
+		activeFp = nil
+		local r1, r2 = nil, nil
+
+		while not inBox and not paused and running do
+			if amWinner then
+				updateStatus("ALAN ARANIYOR")
+				if not activeFp or not isPadAreaClear(activeFp) then
+					local newFp = findEmptyFightPlace()
+					if newFp then
+						activeFp = newFp
+						r1, r2 = getPads(activeFp)
+						tp(r1.CFrame + Vector3.new(0, 3, 0))
+						local er = Players:FindFirstChild(loser) and Players[loser].Character and Players[loser].Character:FindFirstChild("HumanoidRootPart")
+						if er then er.CFrame = r2.CFrame + Vector3.new(0, 3, 0) end
+						task.wait(0.8)
+					else
+						if not activeFp then r1, r2 = nil, nil end
+					end
+				end
+
+				if r1 and r2 then
+					if isPadAreaClear(activeFp) then
+						tp(r1.CFrame + Vector3.new(0, 3, 0))
+						local er = Players:FindFirstChild(loser) and Players[loser].Character and Players[loser].Character:FindFirstChild("HumanoidRootPart")
+						if er then er.CFrame = r2.CFrame + Vector3.new(0, 3, 0) end
+					else
+						tp(r1.CFrame + Vector3.new(0, 10, 0))
+					end
+				end
+			elseif amLoser then
+				updateStatus("WINNER BEKLENİYOR")
+				local fp = findWinnerPad()
+				if fp then
+					local _, lr2 = getPads(fp)
+					if lr2 then
+						tp(isPadAreaClear(fp) and (lr2.CFrame + Vector3.new(0, 3, 0)) or (lr2.CFrame + Vector3.new(0, 10, 0)))
+					end
+				end
+			end
+			task.wait(0.1)
+		end
+		padded = false
+	end)
+end
+
+local function selfDestruct()
+	running = false
+	paused = true
+	for _, cn in ipairs(cons) do if cn then cn:Disconnect() end end
+	local oldPlate = workspace:FindFirstChild("_skyPlate")
+	if oldPlate then oldPlate:Destroy() end
+	screenGui:Destroy()
+end
+
+-- UI Buton Aksiyonu (Açma / Kapatma)
+toggleButton.MouseButton1Click:Connect(function()
+	if running then
+		running = false
+		paused = true
+		updateStatus("DURDURULDU")
+		toggleButton.Text = "FARMI BAŞLAT"
+		toggleButton.BackgroundColor3 = Color3.fromRGB(40, 140, 40)
+		local oldPlate = workspace:FindFirstChild("_skyPlate")
+		if oldPlate then oldPlate:Destroy() end
+	else
+		running = true
+		paused = false
+		updateStatus("AKTİF")
+		toggleButton.Text = "FARMI DURDUR"
+		toggleButton.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+	end
+end)
+
+local lastInvalidTime = 0
+local skyPos = nil
+
+-- ANA DÖNGÜ (Mobil İşlemci Dostu Optimizasyon)
+task.spawn(function()
+	while true do
+		task.wait(0.05) -- Saniyede maksimum 20 döngü (CPU kasmasını önler)
+		if not running then continue end
+
+		if not char or not root or not hum or hum.Health <= 0 then 
+			getChar() 
+			continue 
+		end
+
+		if inBoxCheck() then
+			local gunName = getGunName()
+			if not inBox then
+				inBox = true
+				padded = false
+				lastInvalidTime = tick()
+				if amWinner then
+					task.wait(0.1)
+					grabGun()
+					skyPos = root.Position + Vector3.new(0, 500, 0)
+					createPlatform(skyPos)
+				end
+			end
+
+			updateStatus("KUTUDA / SAVAŞTA")
+
+			if amWinner and skyPos then
+				if not workspace:FindFirstChild("_skyPlate") then createPlatform(skyPos) end
+				tp(CFrame.new(skyPos + Vector3.new(-3, 1, 0)))
+				
+				local enemyPlayer = Players:FindFirstChild(loser)
+				if enemyPlayer and enemyPlayer.Character then
+					local enemyHum = enemyPlayer.Character:FindFirstChildOfClass("Humanoid")
+					local isKO = false
+					local be = enemyPlayer.Character:FindFirstChild("BodyEffects")
+					if be and be:FindFirstChild("K.O") and be["K.O"].Value then isKO = true end
+
+					if not char:FindFirstChild(gunName) then grabGun() end
+
+					if enemyHum and enemyHum.Health > 0 and not soccer and not surveillance and not isKO then
+						local currentDelay = selectedGun == "Revolver" and 0 or 1.8
+						if tick() - lastInvalidTime >= currentDelay then
+							if getgenv().FH_Fire then getgenv().FH_Fire(enemyPlayer) end
+							lastInvalidTime = tick()
+						end
+					else
+						lastInvalidTime = tick()
+					end
+				end
+			elseif amLoser then
+				local wp = Players:FindFirstChild(winner)
+				local wRoot = wp and wp.Character and wp.Character:FindFirstChild("HumanoidRootPart")
+				if wRoot and wRoot.Position.Y > 300 then
+					if not workspace:FindFirstChild("_skyPlate") then createPlatform(wRoot.Position + Vector3.new(3, 0, 0)) end
+					tp(CFrame.new(wRoot.Position + Vector3.new(6, 0, 0)))
+				end
+			end
+			continue
+		end
+
+		if inBox then
+			inBox = false
+			padded = false
+			skyPos = nil
+			local plat = workspace:FindFirstChild("_skyPlate")
+			if plat then plat:Destroy() end
+			if paused then task.wait(0.5) continue end
+		end
+
+		if paused then continue end
+
+		if not padded and bothInCharacters() then
+			startPadLoop()
+		end
+	end
+end)
+
+updateStatus("AKTİF")
